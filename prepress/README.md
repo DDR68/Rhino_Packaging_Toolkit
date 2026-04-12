@@ -6,5 +6,5 @@ Script per la preparazione dei file alla produzione.
 
 | Script | Funzione |
 |--------|----------|
-| `_Prepara_per_Grafica.py` | Preparazione layer e geometrie per ufficio grafico |
-| `_Formato_Foglio.py` | Messa in tavola su foglio macchina |
+| `Prepara_per_Grafica.py` | Preparazione layer e geometrie per ufficio grafico |
+| `Formato_Foglio.py` | Messa in tavola su foglio macchina |
