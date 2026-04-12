@@ -8,4 +8,4 @@ Script per la preparazione dei file alla produzione.
 |--------|----------|
 | `Prepara_per_Grafica.py` | Preparazione layer e geometrie per ufficio grafico |
 | `Formato_Foglio.py` | Messa in tavola su foglio macchina |
-| `Crocini.py | Inserimento crocini di registro |
+| `Crocini.py` | Inserimento crocini di registro |
