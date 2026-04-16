@@ -15,7 +15,6 @@ inc = 18.0            # Larghezza linguetta incollatura
 ganc = 18.0           # Lunghezza patella gancio (inserimento tuck)
 chamf = 3.0           # Smusso angolare dust flap e incollatura
 taper = 2.0           # Rastrematura bordo esterno dust flap
-orecchio = 1.0        # Sporgenza orecchio oltre piega tuck
 fessura_l = 7.0       # Larghezza fessura slit-lock
 fessura_p = 2.5       # Profondita fessura slit-lock
 nurbs_k = 0.635       # Fattore posizione punto controllo Nurbs tuck
@@ -103,11 +102,15 @@ def main():
     # body_h = altezza tra bighe P2/P4 = A - 2S
     body_h = A - 2 * S
 
+    # Orecchio slit-lock = 2*S (proiezione spessore alla piega 90)
+    # La biga tuck fold dista P - 2S dalla biga corpo
+    orecchio = 2 * S
+
     # --- Pannelli asse X ---
     x0 = 0.0
     x1 = inc                           # Biga Incoll.|P1
     x2 = x1 + L - S                    # Biga P1|P2     (P1 = L-S)
-    x3 = x2 + P - 2 * S                # Biga P2|P3     (P2 = P-2S)
+    x3 = x2 + P                        # Biga P2|P3     (P2 = P)
     x4 = x3 + L                        # Biga P3|P4     (P3 = L)
     x5 = x4 + P - S                    # Bordo destro   (P4 = P-S)
 
@@ -117,9 +120,7 @@ def main():
     y_bot_t = y_bot - S
     y_top_t = y_top + S
 
-    # --- Profondita dust flap ---
-    # (P + ganc - S) / 2, mai > L/2
-    dust_d = min((P + ganc - S) / 2.0, L / 2.0)
+ 
 
     # --- Tuck inferiore (da P3) ---
     tuck_b_fold = y_bot_t - P + orecchio
