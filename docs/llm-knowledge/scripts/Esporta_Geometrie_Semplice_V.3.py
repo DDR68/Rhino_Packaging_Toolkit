@@ -1,3 +1,4 @@
+#! python 2
 # -*- coding: utf-8 -*-
 """
 Script: Esporta_Geometrie_Semplice_V.3.py
