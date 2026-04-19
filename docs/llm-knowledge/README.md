@@ -16,7 +16,7 @@ All'inizio di una conversazione, fornire al modello l'URL raw del file pertinent
 
 ```
 Leggi e segui le istruzioni in questo file:
-https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/prompts/rhino-ironpython.md
+https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/rhino-ironpython.md
 ```
 
 Per modelli con accesso web (Claude, ChatGPT con browsing), basta incollare l'URL.
