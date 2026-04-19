@@ -40,6 +40,7 @@ cartotecnica-llm/
 ## Link
 
 ```
+https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/README.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/cartotecnica-strutturale.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/ecma-library.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/pipeline-export.md
