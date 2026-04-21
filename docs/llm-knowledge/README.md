@@ -29,6 +29,7 @@ cartotecnica-llm/
   README.md                              # Questo file
   prompts/
     rhino-ironpython.md                  # System prompt per scripting Rhino 7/8
+    ironpython-examples.md               # Esempi di sintassi dettagliati
   knowledge/
     cartotecnica-strutturale.md          # Grammatica strutturale: patelle, bime, topologia
     ecma-library.md                      # Formati ECMA completati con formule parametriche
@@ -42,6 +43,7 @@ cartotecnica-llm/
 ```
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/README.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/prompts/rhino-ironpython.md
+https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/prompts/ironpython-examples.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/cartotecnica-strutturale.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/ecma-library.md
 https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-knowledge/knowledge/pipeline-export.md
