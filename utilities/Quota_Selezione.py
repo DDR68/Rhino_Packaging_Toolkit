@@ -1,3 +1,4 @@
+#! python 2
 # -*- coding: utf-8 -*-
 import Rhino
 import Rhino.Geometry as rg
