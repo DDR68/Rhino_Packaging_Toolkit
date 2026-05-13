@@ -7,8 +7,9 @@ Compatible with Rhino 7 and 8..
 
 | Script | Tipologia ECMA | Descrizione |
 |--------|---------------|-------------|
-| `ECMA_A20_20_03_01.py` | ECMA_A 20.20.03.01 | Tuck-end case, staggered flaps |
-| `ECMA_A20_20_01_01.py` | ECMA_A 20.20.01.01 | Tuck-end case, aligned flaps |
+| `ECMA_A20_20_03_01.py` | ECMA A20.20.03.01 | Tuck-end case, staggered flaps |
+| `ECMA_A20_20_01_01.py` | ECMA A20.20.01.01 | Tuck-end case, aligned flaps |
+| `ECMA_A01_55_00_01.py` | ECMA A01.55.00.01 | Crash-lock bottom |
 
 
 ## Conventions
