@@ -156,7 +156,7 @@ def main():
     LC = ensure_layer("Cordone", 255,   0,   0)
 
     # ==========================================================
-    # 1. CORDONATURE VERTICALI (bighe pannelli)
+    # 1. CORDONATURE VERTICALI (piega pannelli)
     # ==========================================================
     linea((x1, y_bot),     (x1, y_top),     LC)  # incollatura (cordone completo)
     linea((x2, y_bot),     (x2, y_top),     LC)
