@@ -1,3 +1,4 @@
+#! python 2
 # -*- coding: utf-8 -*-
 """
 Script per Rhino 7 (IronPython 2.7.12)
