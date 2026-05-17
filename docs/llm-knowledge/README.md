@@ -53,7 +53,7 @@ https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/main/docs/llm-kn
 ## Contesto
 
 Questo materiale nasce dal lavoro pratico di progettazione cartotecnica con Rhinoceros 7,
-sviluppato da un cartotecnico professionista con formazione in scultura (Accademia di Brera).
+sviluppato da un cartotecnico professionista che lavora nel settore dall'anno 2000.
 Le convenzioni e le regole documentate qui sono state validate su tracciati reali e
 corrette iterativamente attraverso centinaia di test.
 
