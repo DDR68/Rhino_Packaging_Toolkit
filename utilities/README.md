@@ -6,6 +6,5 @@ Script di utilità per il lavoro quotidiano in cartotecnica.
 
 | Script | Funzione |
 |--------|----------|
-| `Colore_Livello.py` | Sposta su livello per Colore |
-| `PKG_Annotator_V3.py` | Inserimento punti per regole parametriche |
-| `Quota_Selezione.py` | Quotatura interattiva di geometrie selezionate |
+| `PKG_Annotator_V3.py` | Inserimento punti per regole parametriche. |
+| `Esporta_Geometrie_Parametrico_V_5.py` |Esporta la selezione aplicando le regole parametriche per LLM. |
