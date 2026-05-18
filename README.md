@@ -2,7 +2,7 @@
 
 An open-source toolkit for **structural packaging design** in Rhinoceros 7 & 8.
 
-IronPython scripts that automate the most time-consuming parts of folding carton development: parametric die-cut generation, dimensioning, prepress preparation, and diagnostic checks — all running inside Rhino's built-in script editor with zero external dependencies.
+IronPython scripts that automate the most time-consuming parts of folding carton development: parametric die-cut generation, dimensioning, prepress preparation, and diagnostic checks all running inside Rhino's built-in script editor with zero external dependencies.
 
 > **Who is this for?** Packaging designers and structural engineers (*cartotecnici*) who use Rhino as their CAD environment and want to replace repetitive manual drawing with parametric, reusable scripts.
 
