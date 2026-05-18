@@ -21,7 +21,7 @@ docs/               Guides and documentation
 
 ## Packaging — Parametric Generators
 
-Each script takes basic box dimensions — width, depth, height, board thickness — and produces a complete, production-ready die-cut layout at the origin.
+Each script takes basic box dimensions width, depth, height, board thickness and produces a complete, production-ready die-cut layout at the origin.
 
 | Script | ECMA Code | Box Style | Status | Img. |
 |--------|-----------|-----------|--------|----|
