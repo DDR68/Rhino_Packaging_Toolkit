@@ -27,6 +27,7 @@ Each script takes basic box dimensions — width, depth, height, board thickness
 |--------|-----------|-----------|--------|----|
 | `ECMA_A20_20_03_01.py` | A20.20.03.01 | Reverse Tuck End | ✅ Published | ![    ](docs/ECMA_A20_20_03_01.png) |
 | `ECMA_A20_20_01_01.py` | A20.20.01.01 | Straight Tuck End | ✅ Published | ![    ](docs/ECMA_A20_20_01_01.png) |
+| `ECMA_A01_55_00_01.py` | A20.20.01.01 | Straight Tuck End | ✅ Published | ![    ](docs/ECMA_A01_55_00_01.png) |
 
 **Input parameters:**
 - **L** — Width (main panel)
