@@ -17,5 +17,5 @@ Compatible with Rhino 7 and 8..
 - **Cut" Layer** (black): cutting lines
 - **Crease" Layer** (red): crease lines
 - **Punch" Layer** (blue): perforation lines
-- Units: millimeters
-- Cardboard thickness: parametric, with automatic compensation
+- **Units:** millimeters
+- **Cardboard thickness:** parametric, with automatic compensation
