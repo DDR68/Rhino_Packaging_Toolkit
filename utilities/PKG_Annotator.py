@@ -2,22 +2,41 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PACKAGING POINT ANNOTATOR  v3.0  -  Rhino 7 / 8  (IronPython 2.7)
+#  PACKAGING POINT ANNOTATOR  v4.0  -  Rhino 7 / 8  (IronPython 2.7)
 #
 #  Variabili packaging:
 #    L = Larghezza         P = Profondita      A = Altezza
 #    S = Spessore cartone  C = Patella d'incollatura (colla)
 #    T = Patella di chiusura (Tuck)             E = Bisello (misura configurabile)
 #
-#  Novita' v3 rispetto a v2.1:
+#  Novita' v4 rispetto a v3.0:
+#    - VISIBILITA' AL CLIC: il Point viene creato e disegnato SUBITO dopo il
+#      clic, prima di aprire il dialogo di annotazione. Cosi' il punto su cui
+#      si sta lavorando e' sempre visibile nel viewport mentre si ragiona
+#      sulla formula. (in v3 il punto veniva disegnato solo DOPO la conferma,
+#      risultando invisibile durante tutta l'annotazione)
+#    - ROLLBACK PULITO: se l'utente preme "Salta" o "Annulla tutto", il punto
+#      provvisorio appena creato viene cancellato, senza lasciare oggetti
+#      orfani privi di annotazione.
+#    - L'aggancio alla logica di sovrascrittura per chiave geometrica resta
+#      invariato: il punto provvisorio nasce gia' con il suo point_key.
+#    - SUGGERIMENTO COORDINATA ZERO: se la coordinata target e' 0 (entro
+#      tolleranza), il reverse lookup ritorna direttamente la sola costante
+#      "0", saltando l'intera batteria combinatoria. Piu' veloce e piu'
+#      leggibile dell'elenco di formule che si annullerebbero a zero.
+#    - TERMINI COMPOSTI DI COMPENSAZIONE: il generatore di candidati ora sa
+#      aggiungere binomi come (L-S), (P-S), (A-S) (lista COMPOUND_TERMS),
+#      non solo variabili nude. Cosi' formule frequenti in cartotecnica come
+#      'C+(L-S)+P+L+(P-S)' diventano raggiungibili dal reverse lookup.
+#      Limite noto: la forma canonica tratta '(P-S)' e 'P-S' come monomi
+#      distinti (nessun parser algebrico in IronPython 2.7).
+#
+#  Eredita da v3:
 #    - Schema di naming geometrico: PKG_X+0112_Y-0030 (chiave posizionale)
 #    - Nota utente solo in UserString "Nota", il nome resta una chiave pulita
 #    - TextDot con altezza 10 e colore secondo completezza (grigio/giallo)
-#    - Sovrascrittura automatica: ri-cliccando una posizione il vecchio
-#      punto e il suo TextDot vengono cancellati
-#    - Reverse lookup "vicino geometrico": il pulsante Suggerisci parte
-#      dalla formula del punto piu' vicino e propone varianti per
-#      riduzione/aggiunta di un termine
+#    - Sovrascrittura automatica per chiave geometrica
+#    - Reverse lookup "vicino geometrico" con pool di sorgenti
 # =============================================================================
 
 import Rhino
@@ -45,6 +64,16 @@ COLOR_DOT_COMPLETE   = Drawing.Color.FromArgb(105, 105, 105)   # grigio: X e Y e
 COLOR_DOT_INCOMPLETE = Drawing.Color.FromArgb(220, 180, 0)     # giallo: mancanze (Nota esclusa dal calcolo)
 
 VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
+
+# Termini COMPOSTI aggiungibili nel reverse lookup (v4).
+# In cartotecnica la compensazione di un lato per lo spessore del cartone
+# (L-S), (P-S), (A-S) e' un'espressione frequentissima quanto una variabile
+# nuda. Il generatore di candidati neighbor_candidates_from() aggiunge questi
+# binomi accanto alle variabili semplici, cosi' formule come
+# 'C+(L-S)+P+L+(P-S)' diventano raggiungibili partendo da 'C+(L-S)+P+L'.
+# Per estendere (es. doppia compensazione), basta aggiungere qui le stringhe:
+# es. "(L-S*2)", "(P-2*S)". Le versioni negative sono generate in automatico.
+COMPOUND_TERMS = ["(L-S)", "(P-S)", "(A-S)"]
 VAR_LABELS = {
     "L": "Larghezza",
     "P": "Profondita",
@@ -539,6 +568,18 @@ def neighbor_candidates_from(expr_source):
         if plus not in existing:
             candidates.append(join_terms(terms + [minus]))
 
+    # 2bis) Aggiunta in coda dei termini COMPOSTI di compensazione (v4)
+    # es. (P-S), (L-S), (A-S). Filtro: non ri-aggiungo un composto gia'
+    # presente (evita 'C+(P-S)+(P-S)'); l'opposto '-(P-S)' viene comunque
+    # collassato dalla forma canonica se ridondante.
+    for c in COMPOUND_TERMS:
+        plus  = "+" + c
+        minus = "-" + c
+        if plus not in existing:
+            candidates.append(join_terms(terms + [plus]))
+        if minus not in existing:
+            candidates.append(join_terms(terms + [minus]))
+
     # 3) Aggiunta in testa, stesso filtro
     for v in VAR_NAMES:
         plus  = "+" + v
@@ -546,6 +587,15 @@ def neighbor_candidates_from(expr_source):
         if minus not in existing:
             candidates.append(join_terms([plus] + terms))
         if plus not in existing:
+            candidates.append(join_terms([minus] + terms))
+
+    # 3bis) Aggiunta in testa dei termini COMPOSTI (v4)
+    for c in COMPOUND_TERMS:
+        plus  = "+" + c
+        minus = "-" + c
+        if plus not in existing:
+            candidates.append(join_terms([plus] + terms))
+        if minus not in existing:
             candidates.append(join_terms([minus] + terms))
 
     # 4) La sorgente stessa
@@ -574,6 +624,15 @@ def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
     """
     canon_seen = set()
     matches = []
+
+    # CASO SPECIALE (v4): target == 0.
+    # Se la coordinata cercata e' zero (entro tolleranza), l'unico
+    # suggerimento sensato e leggibile e' la costante "0". Evitiamo l'intera
+    # batteria combinatoria: e' inutile cercare formule che valgono zero
+    # (sarebbero solo termini che si annullano, gia' scartati altrove dal
+    # filtro canonico canon == "0"). Ritorniamo subito, risparmiando lavoro.
+    if abs(target) <= tol:
+        return [("0", 0.0, 0.0, "ok")]
 
     # Retrocompatibilita': accetta singola stringa o lista
     if source_exprs is None:
@@ -1116,7 +1175,7 @@ def show_summary_dialog(records):
         return
 
     form = WinForms.Form()
-    form.Text = "Riepilogo sessione - PKG Annotator v3"
+    form.Text = "Riepilogo sessione - PKG Annotator v4"
     form.Width = 780
     form.Height = 480
     form.StartPosition = WinForms.FormStartPosition.CenterScreen
@@ -1184,6 +1243,67 @@ def show_summary_dialog(records):
 
 
 # -----------------------------------------------------------------------------
+#  CREAZIONE / AGGIORNAMENTO PUNTO  (v4)
+# -----------------------------------------------------------------------------
+def create_provisional_point(pt, point_key, idx_pts):
+    """Crea SUBITO il Point al clic, prima del dialogo (novita' v4).
+    Il punto nasce gia' con il suo point_key e con UserString minimi che lo
+    marcano come 'provvisorio'. Ritorna il GUID, oppure Guid.Empty se fallisce.
+
+    Questo rende il punto visibile nel viewport mentre l'utente ragiona sulla
+    formula. Se l'annotazione viene saltata/annullata, il punto verra'
+    rimosso da rollback_provisional_point()."""
+    fmt = "%." + str(DECIMALS) + "f"
+    attr_pt = Rhino.DocObjects.ObjectAttributes()
+    attr_pt.LayerIndex  = idx_pts
+    attr_pt.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromLayer
+    attr_pt.Name = point_key
+
+    pt_guid = sc.doc.Objects.AddPoint(pt, attr_pt)
+    if pt_guid != System.Guid.Empty:
+        rh_obj = sc.doc.Objects.FindId(pt_guid)
+        if rh_obj:
+            rh_obj.Attributes.SetUserString("X_reale", fmt % pt.X)
+            rh_obj.Attributes.SetUserString("Y_reale", fmt % pt.Y)
+            rh_obj.Attributes.SetUserString("PKG_provvisorio", "1")
+            sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
+        sc.doc.Views.Redraw()  # forza il viewport a mostrare il punto subito
+    return pt_guid
+
+
+def rollback_provisional_point(pt_guid):
+    """Cancella il punto provvisorio creato al clic, usato quando l'utente
+    salta o annulla l'annotazione (novita' v4)."""
+    if pt_guid is None or pt_guid == System.Guid.Empty:
+        return
+    sc.doc.Objects.Delete(pt_guid, True)
+    sc.doc.Views.Redraw()
+
+
+def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
+    """Aggiorna gli UserString del punto provvisorio gia' creato, rendendolo
+    definitivo (rimuove il flag PKG_provvisorio). Ritorna l'oggetto Rhino
+    aggiornato o None."""
+    fmt = "%." + str(DECIMALS) + "f"
+    if pt_guid == System.Guid.Empty:
+        return None
+    rh_obj = sc.doc.Objects.FindId(pt_guid)
+    if not rh_obj:
+        return None
+    rh_obj.Attributes.SetUserString("X_reale",  fmt % x)
+    rh_obj.Attributes.SetUserString("Y_reale",  fmt % y)
+    rh_obj.Attributes.SetUserString("X_param",  expr_x if expr_x else "--")
+    rh_obj.Attributes.SetUserString("Y_param",  expr_y if expr_y else "--")
+    rh_obj.Attributes.SetUserString("X_status", sx)
+    rh_obj.Attributes.SetUserString("Y_status", sy)
+    rh_obj.Attributes.SetUserString("Nota",     note if note else "")
+    rh_obj.Attributes.SetUserString("PKG_provvisorio", "")  # non piu' provvisorio
+    rh_obj.Attributes.Name = point_key  # chiave pulita, niente nota
+    sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
+    return rh_obj
+
+
+# -----------------------------------------------------------------------------
 def main():
     vars_dict, save_to_doc = show_params_dialog()
     if vars_dict is None:
@@ -1222,6 +1342,8 @@ def main():
         dot_key   = make_dot_key(x, y)
 
         # === Sovrascrittura (Punto 4): cerca e cancella eventuali duplicati ===
+        # NB: la ricerca avviene PRIMA di creare il punto provvisorio, cosi'
+        # find_existing_by_key non rischia di trovare il punto appena creato.
         old_pt_obj, old_dot_obj, preset = find_existing_by_key(point_key, dot_key, tol)
         is_overwrite = (old_pt_obj is not None)
         if is_overwrite:
@@ -1230,15 +1352,20 @@ def main():
                 point_key, n_removed)
             sc.doc.Views.Redraw()
 
+        # === VISIBILITA' AL CLIC (novita' v4) ===
+        # Creo SUBITO il punto, prima del dialogo, cosi' e' visibile nel
+        # viewport mentre ragiono sulla formula. Se poi salto/annullo, lo
+        # rimuovo con rollback_provisional_point().
+        prov_guid = create_provisional_point(pt, point_key, idx_pts)
+
         # === Reverse lookup sorgente: pool di vicini geometrici (Punto 3) ===
-        # Raccolgo le formule dei k=3 punti piu' vicini + tutte le formule
-        # distinte presenti nel documento. Cosi' il bottone "Suggerisci"
-        # ha sempre una base ricca da cui derivare candidati per riduzione
-        # o aggiunta di un termine.
+        # IMPORTANTE: escludo il punto provvisorio appena creato dalla raccolta
+        # delle sorgenti. exclude_at_zero_dist=True scarta i punti a distanza
+        # ~0 dal target, quindi il provvisorio (che e' esattamente sul target)
+        # viene ignorato. Inoltre non ha ancora X_param/Y_param, quindi anche
+        # se entrasse non aggiungerebbe sorgenti.
         sources_x, sources_y = collect_source_formulas(
             pt, k_neighbors=3, exclude_at_zero_dist=True, tol=tol)
-        # Mantengo anche source_ex/source_ey come il primo vicino, per
-        # retrocompatibilita' e per il label informativo
         source_ex = sources_x[0] if sources_x else None
         source_ey = sources_y[0] if sources_y else None
 
@@ -1251,29 +1378,20 @@ def main():
             preset_ey=preset["Y_param"],
             preset_note=preset["Nota"])
 
+        # === Gestione esito del dialogo ===
         if expr_x is None:
+            # "Annulla tutto": rollback del provvisorio e uscita dal ciclo
+            rollback_provisional_point(prov_guid)
             break
 
-        # === Crea il nuovo Point con chiave geometrica come nome ===
-        attr_pt = Rhino.DocObjects.ObjectAttributes()
-        attr_pt.LayerIndex  = idx_pts
-        attr_pt.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromLayer
-        attr_pt.Name = point_key
+        if sx == "empty" and sy == "empty" and not expr_x and not expr_y and not note:
+            # "Salta": l'utente non ha annotato nulla -> rollback del provvisorio
+            # e passa al punto successivo senza creare TextDot ne' record.
+            rollback_provisional_point(prov_guid)
+            continue
 
-        pt_guid = sc.doc.Objects.AddPoint(pt, attr_pt)
-
-        if pt_guid != System.Guid.Empty:
-            rh_obj = sc.doc.Objects.FindId(pt_guid)
-            if rh_obj:
-                rh_obj.Attributes.SetUserString("X_reale",  fmt % x)
-                rh_obj.Attributes.SetUserString("Y_reale",  fmt % y)
-                rh_obj.Attributes.SetUserString("X_param",  expr_x if expr_x else "--")
-                rh_obj.Attributes.SetUserString("Y_param",  expr_y if expr_y else "--")
-                rh_obj.Attributes.SetUserString("X_status", sx)
-                rh_obj.Attributes.SetUserString("Y_status", sy)
-                rh_obj.Attributes.SetUserString("Nota",     note if note else "")
-                rh_obj.Attributes.Name = point_key  # chiave pulita, niente nota
-                sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
+        # === Finalizza il punto provvisorio (aggiorna gli UserString) ===
+        finalize_point(prov_guid, point_key, x, y, expr_x, expr_y, sx, sy, note)
 
         # === Crea il TextDot, colore in base alla completezza (Punto 2) ===
         dot_text = build_dot_text(x, y, expr_x, expr_y, note, sx, sy)
@@ -1310,7 +1428,7 @@ def main():
     if count > 0:
         show_summary_dialog(records)
 
-    print "PKG Annotator v3: %d punto/i creato/i o aggiornato/i." % count
+    print "PKG Annotator v4: %d punto/i creato/i o aggiornato/i." % count
 
 
 if __name__ == "__main__":
