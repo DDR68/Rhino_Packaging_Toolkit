@@ -43,7 +43,8 @@ COME LEGGERE I DATI CHE SEGUONO
   la forma parametrica sta nelle formule del blocco UserText.
 
 COSA DEVI PRODURRE
-Uno script che definisca le variabili in testa (cosi' che modificandole il
+Uno script che chieda le variabili L,P,A,S
+in mancanza di input utilizzi i valori predefiniti in testa (cosi' che modificandole il
 disegno si riscali), costruisca tutte le geometrie dalle loro formule, e le
 disegni nei layer corretti (Taglio, Cordone, MezzoTaglio, Foratore).
 
