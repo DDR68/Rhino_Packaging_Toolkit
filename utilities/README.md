@@ -1,6 +1,6 @@
 # Utilities — Strumenti di Lavoro
 
-Script di utilità per il lavoro quotidiano in cartotecnica.
+Script di utilità per il lavoro parametrico.
 
 ## Script disponibili
 
