@@ -2,34 +2,31 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PACKAGING POINT ANNOTATOR  v4.0  -  Rhino 7 / 8  (IronPython 2.7)
+#  PACKAGING POINT ANNOTATOR  v4.1  -  Rhino 7 / 8  (IronPython 2.7)
 #
 #  Variabili packaging:
 #    L = Larghezza         P = Profondita      A = Altezza
 #    S = Spessore cartone  C = Patella d'incollatura (colla)
 #    T = Patella di chiusura (Tuck)             E = Bisello (misura configurabile)
 #
+#  Novita' v4.1 rispetto a v4.0:
+#    - CONTRATTO CON L'EXPORTER: ogni punto parametrico ora scrive nello
+#      UserString anche la chiave "pair_id" (valore = point_key geometrico,
+#      es. PKG_X+0100_Y+0000). Esporta_Geometrie_Parametrico legge questa
+#      chiave per popolare P1_id / P2_id / Centro_id nelle curve propagate.
+#      In v4.0 la chiave non veniva mai scritta, quindi quei campi uscivano
+#      sempre vuoti nel TXT di export.
+#    - finalize_point() e create_provisional_point() scrivono pair_id.
+#
 #  Novita' v4 rispetto a v3.0:
 #    - VISIBILITA' AL CLIC: il Point viene creato e disegnato SUBITO dopo il
-#      clic, prima di aprire il dialogo di annotazione. Cosi' il punto su cui
-#      si sta lavorando e' sempre visibile nel viewport mentre si ragiona
-#      sulla formula. (in v3 il punto veniva disegnato solo DOPO la conferma,
-#      risultando invisibile durante tutta l'annotazione)
+#      clic, prima di aprire il dialogo di annotazione.
 #    - ROLLBACK PULITO: se l'utente preme "Salta" o "Annulla tutto", il punto
-#      provvisorio appena creato viene cancellato, senza lasciare oggetti
-#      orfani privi di annotazione.
-#    - L'aggancio alla logica di sovrascrittura per chiave geometrica resta
-#      invariato: il punto provvisorio nasce gia' con il suo point_key.
+#      provvisorio appena creato viene cancellato.
 #    - SUGGERIMENTO COORDINATA ZERO: se la coordinata target e' 0 (entro
-#      tolleranza), il reverse lookup ritorna direttamente la sola costante
-#      "0", saltando l'intera batteria combinatoria. Piu' veloce e piu'
-#      leggibile dell'elenco di formule che si annullerebbero a zero.
-#    - TERMINI COMPOSTI DI COMPENSAZIONE: il generatore di candidati ora sa
-#      aggiungere binomi come (L-S), (P-S), (A-S) (lista COMPOUND_TERMS),
-#      non solo variabili nude. Cosi' formule frequenti in cartotecnica come
-#      'C+(L-S)+P+L+(P-S)' diventano raggiungibili dal reverse lookup.
-#      Limite noto: la forma canonica tratta '(P-S)' e 'P-S' come monomi
-#      distinti (nessun parser algebrico in IronPython 2.7).
+#      tolleranza), il reverse lookup ritorna direttamente la costante "0".
+#    - TERMINI COMPOSTI DI COMPENSAZIONE: il generatore di candidati aggiunge
+#      binomi come (L-S), (P-S), (A-S) (lista COMPOUND_TERMS).
 #
 #  Eredita da v3:
 #    - Schema di naming geometrico: PKG_X+0112_Y-0030 (chiave posizionale)
@@ -66,13 +63,6 @@ COLOR_DOT_INCOMPLETE = Drawing.Color.FromArgb(220, 180, 0)     # giallo: mancanz
 VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
 
 # Termini COMPOSTI aggiungibili nel reverse lookup (v4).
-# In cartotecnica la compensazione di un lato per lo spessore del cartone
-# (L-S), (P-S), (A-S) e' un'espressione frequentissima quanto una variabile
-# nuda. Il generatore di candidati neighbor_candidates_from() aggiunge questi
-# binomi accanto alle variabili semplici, cosi' formule come
-# 'C+(L-S)+P+L+(P-S)' diventano raggiungibili partendo da 'C+(L-S)+P+L'.
-# Per estendere (es. doppia compensazione), basta aggiungere qui le stringhe:
-# es. "(L-S*2)", "(P-2*S)". Le versioni negative sono generate in automatico.
 COMPOUND_TERMS = ["(L-S)", "(P-S)", "(A-S)"]
 VAR_LABELS = {
     "L": "Larghezza",
@@ -330,17 +320,7 @@ def show_params_dialog():
 #  REVERSE LOOKUP (Punto 3) - basato sul vicino geometrico
 # -----------------------------------------------------------------------------
 def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False, tol=1e-6):
-    """Raccoglie un POOL di formule sorgenti per il reverse lookup.
-    Strategia:
-      1) Trova i k punti annotati piu' vicini al target (distanza euclidea).
-      2) Raccoglie le X_param e Y_param dei k vicini, in ordine di vicinanza.
-      3) Aggiunge in coda TUTTE le altre X_param e Y_param distinte presenti
-         nel documento (pool "imparato dal documento"): cosi' se il vicino
-         geometrico ha formula vuota, abbiamo comunque sorgenti plausibili
-         derivate dall'uso reale.
-
-    Ritorna (sources_x, sources_y) come liste ordinate per priorita',
-    senza duplicati e senza stringhe vuote."""
+    """Raccoglie un POOL di formule sorgenti per il reverse lookup."""
     idx = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
     if idx < 0:
         return [], []
@@ -380,7 +360,6 @@ def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False
     seen_x = set()
     seen_y = set()
 
-    # FASE A: i primi k vicini (priorita' alta)
     for d, ex, ey in entries[:k_neighbors]:
         if ex and ex not in seen_x:
             sources_x.append(ex)
@@ -389,8 +368,6 @@ def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False
             sources_y.append(ey)
             seen_y.add(ey)
 
-    # FASE B: pool "imparato dal documento" (priorita' bassa, ma utile
-    # quando il vicino geometrico ha formula vuota)
     for ex in all_ex:
         if ex and ex not in seen_x:
             sources_x.append(ex)
@@ -404,9 +381,7 @@ def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False
 
 
 def find_nearest_annotated_point(target_pt, exclude_at_zero_dist=False, tol=1e-6):
-    """Wrapper retrocompatibile: ritorna la PRIMA sorgente del pool
-    (cioe' il vicino geometricamente piu' prossimo). Usato per il
-    label informativo "Sorgente vicino" nel dialogo Suggerisci."""
+    """Wrapper retrocompatibile: ritorna la PRIMA sorgente del pool."""
     sx_list, sy_list = collect_source_formulas(
         target_pt, k_neighbors=1,
         exclude_at_zero_dist=exclude_at_zero_dist, tol=tol)
@@ -416,14 +391,7 @@ def find_nearest_annotated_point(target_pt, exclude_at_zero_dist=False, tol=1e-6
 
 
 def split_top_level_terms(expr):
-    """Spezza un'espressione nei suoi termini di somma di primo livello,
-    rispettando le parentesi. Ogni termine porta con se' il proprio segno.
-    Esempi:
-        'C+L+P'      -> ['+C', '+L', '+P']
-        'L-S*2'      -> ['+L', '-S*2']
-        '(L-S*2)/2'  -> ['+(L-S*2)/2']
-        'A+T-S'      -> ['+A', '+T', '-S']
-    """
+    """Spezza un'espressione nei suoi termini di somma di primo livello."""
     expr = expr.strip()
     if not expr:
         return []
@@ -468,19 +436,60 @@ def join_terms(terms):
     return out
 
 
+def _compensation_pairs():
+    """Coppie di compensazione derivate da COMPOUND_TERMS.
+    Per ogni '(V-S)' ritorna (V, S, '(V-S)'), es. ('P','S','(P-S)').
+    Cosi' estendendo COMPOUND_TERMS (es. aggiungendo '(E-S)') la
+    normalizzazione segue automaticamente, senza altre modifiche."""
+    pairs = []
+    for comp in COMPOUND_TERMS:
+        m = re.match(r"^\(([A-Za-z])\-([A-Za-z])\)$", comp)
+        if m:
+            pairs.append((m.group(1), m.group(2), comp))
+    return pairs
+
+
+def normalize_compensation(expr):
+    """Ricompatta i binomi di compensazione di primo livello in forma
+    parentesizzata: una coppia di termini consecutivi '+V' seguiti da '-S'
+    (con '(V-S)' in COMPOUND_TERMS) viene unita in '+(V-S)'.
+
+    Scopo cartotecnico: la forma '(P-S)' rende esplicito SU QUALE LATO si
+    scarica lo spessore S del cartone; '+P-S' sparso tra altri termini
+    perde quella leggibilita'. Il reverse lookup puo' generare entrambe le
+    scritture a seconda del vicino geometrico usato come sorgente; questa
+    funzione garantisce che il suggerimento esca sempre nella forma con
+    parentesi.
+
+    Non tocca termini gia' parentesizzati, ne' monomi con moltiplicatori o
+    divisioni (es. 'S*2', 'P/3', 'L-S*2'): quelli restano invariati.
+    Il valore numerico non cambia mai."""
+    terms = split_top_level_terms(expr)
+    if len(terms) < 2:
+        return expr
+    pairs = _compensation_pairs()
+    out = []
+    i = 0
+    while i < len(terms):
+        t = terms[i]
+        merged = False
+        if i + 1 < len(terms):
+            nxt = terms[i + 1]
+            for v, s, comp in pairs:
+                if t == "+" + v and nxt == "-" + s:
+                    out.append("+" + comp)
+                    i += 2
+                    merged = True
+                    break
+        if not merged:
+            out.append(t)
+            i += 1
+    return join_terms(out)
+
+
 def canonical_form(expr):
     """Forma canonica di un'espressione: somma di monomi atomici di primo
-    livello con coefficienti aggregati. Serve come chiave robusta per il
-    filtro duplicati: 'C+L-S+E-E' e 'C+L-S' producono la stessa forma
-    canonica e quindi vengono trattati come la stessa formula.
-
-    Ritorna la stringa canonica (es. 'C+L-S', '2*L+S', '0').
-
-    Limitazione consapevole: non e' una semplificazione algebrica completa
-    (non riconosce L*2 == L+L), ma cattura il caso pratico dei termini che
-    si annullano sommando segni opposti dello stesso monomio testuale.
-    Riconosce inoltre i monomi puramente numerici come neutri se valgono 0
-    (cosi' '0+S' viene canonicalizzato in 'S')."""
+    livello con coefficienti aggregati."""
     terms = split_top_level_terms(expr)
     coeffs = {}
     for t in terms:
@@ -497,7 +506,6 @@ def canonical_form(expr):
             mono = t.strip()
         if not mono:
             continue
-        # Scarta monomi numerici pari a zero ('0', '0.0', '00')
         try:
             if float(mono) == 0.0:
                 continue
@@ -505,7 +513,6 @@ def canonical_form(expr):
             pass
         coeffs[mono] = coeffs.get(mono, 0) + sign
 
-    # Rimuovi monomi con coefficiente zero (questo elimina '+E-E', 'L-L', ecc.)
     nonzero = {}
     for k, v in coeffs.items():
         if v != 0:
@@ -532,13 +539,7 @@ def canonical_form(expr):
 
 
 def neighbor_candidates_from(expr_source):
-    """Varianti della formula sorgente per riduzione e aggiunta di un termine.
-    Filtri attivi:
-      - Non aggiunge -V se +V e' gia' un termine di primo livello (e viceversa),
-        per evitare candidati di auto-cancellazione tipo 'C+L+E-E'.
-      - Include riduzione interna (rimozione di un termine in mezzo) oltre
-        a riduzione di testa/coda.
-    """
+    """Varianti della formula sorgente per riduzione e aggiunta di un termine."""
     candidates = []
     terms = split_top_level_terms(expr_source)
     if not terms:
@@ -547,19 +548,16 @@ def neighbor_candidates_from(expr_source):
             candidates.append("-" + v)
         return candidates
 
-    existing = set(terms)  # contiene es. {'+C', '+L', '-S'}
+    existing = set(terms)
 
-    # 1) Riduzione di testa e coda
     if len(terms) > 1:
         candidates.append(join_terms(terms[:-1]))
         candidates.append(join_terms(terms[1:]))
 
-    # 1bis) Riduzione interna: togli un termine al centro
     if len(terms) > 2:
         for i in range(1, len(terms) - 1):
             candidates.append(join_terms(terms[:i] + terms[i+1:]))
 
-    # 2) Aggiunta in coda, con filtro strutturale
     for v in VAR_NAMES:
         plus  = "+" + v
         minus = "-" + v
@@ -568,10 +566,6 @@ def neighbor_candidates_from(expr_source):
         if plus not in existing:
             candidates.append(join_terms(terms + [minus]))
 
-    # 2bis) Aggiunta in coda dei termini COMPOSTI di compensazione (v4)
-    # es. (P-S), (L-S), (A-S). Filtro: non ri-aggiungo un composto gia'
-    # presente (evita 'C+(P-S)+(P-S)'); l'opposto '-(P-S)' viene comunque
-    # collassato dalla forma canonica se ridondante.
     for c in COMPOUND_TERMS:
         plus  = "+" + c
         minus = "-" + c
@@ -580,7 +574,6 @@ def neighbor_candidates_from(expr_source):
         if minus not in existing:
             candidates.append(join_terms(terms + [minus]))
 
-    # 3) Aggiunta in testa, stesso filtro
     for v in VAR_NAMES:
         plus  = "+" + v
         minus = "-" + v
@@ -589,7 +582,6 @@ def neighbor_candidates_from(expr_source):
         if plus not in existing:
             candidates.append(join_terms([minus] + terms))
 
-    # 3bis) Aggiunta in testa dei termini COMPOSTI (v4)
     for c in COMPOUND_TERMS:
         plus  = "+" + c
         minus = "-" + c
@@ -598,43 +590,19 @@ def neighbor_candidates_from(expr_source):
         if minus not in existing:
             candidates.append(join_terms([minus] + terms))
 
-    # 4) La sorgente stessa
     candidates.append(join_terms(terms))
 
     return candidates
 
 
 def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
-    """Reverse lookup parametrico.
-
-    Parametri:
-      target       : valore numerico target (X reale o Y reale del punto)
-      vars_dict    : valori correnti delle variabili packaging
-      tol          : tolleranza del documento
-      source_exprs : LISTA di formule sorgente (ordinate per priorita',
-                     tipicamente provenienti dai k vicini geometrici piu'
-                     il pool "imparato dal documento"). Puo' essere anche
-                     una stringa singola, per retrocompatibilita'.
-      max_results  : numero massimo di candidati da ritornare
-
-    Filtro duplicati: usa la FORMA CANONICA del candidato (cfr canonical_form)
-    invece della stringa testuale. Cosi' 'C+L-S+E-E' e 'C+L-S' vengono
-    riconosciuti come la stessa formula e il candidato ridondante viene
-    scartato a favore del piu' breve.
-    """
+    """Reverse lookup parametrico."""
     canon_seen = set()
     matches = []
 
-    # CASO SPECIALE (v4): target == 0.
-    # Se la coordinata cercata e' zero (entro tolleranza), l'unico
-    # suggerimento sensato e leggibile e' la costante "0". Evitiamo l'intera
-    # batteria combinatoria: e' inutile cercare formule che valgono zero
-    # (sarebbero solo termini che si annullano, gia' scartati altrove dal
-    # filtro canonico canon == "0"). Ritorniamo subito, risparmiando lavoro.
     if abs(target) <= tol:
         return [("0", 0.0, 0.0, "ok")]
 
-    # Retrocompatibilita': accetta singola stringa o lista
     if source_exprs is None:
         source_list = []
     elif isinstance(source_exprs, str):
@@ -646,36 +614,27 @@ def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
         expr_str = expr_str.strip()
         if not expr_str:
             return
-        # Canonicalizza per il filtro: collassa termini opposti e ordina
         canon = canonical_form(expr_str)
-        # Scarta candidati banali (zero) e duplicati canonici
         if canon == "0" or canon in canon_seen:
             return
         canon_seen.add(canon)
-        # Valuta la forma originale (mantiene la leggibilita' nell'UI)
-        # Se la forma originale e' piu' lunga della canonica, preferiamo
-        # la canonica come stringa visualizzata: e' piu' compatta e priva
-        # di termini ridondanti.
         display_expr = canon if len(canon) < len(expr_str) else expr_str
+        # Normalizza i binomi di compensazione in forma '(V-S)' per
+        # rendere esplicito il lato su cui si scarica lo spessore cartone.
+        # La leggibilita' della compensazione ha priorita' sulla brevita',
+        # quindi applichiamo la normalizzazione anche se allunga la stringa.
+        display_expr = normalize_compensation(display_expr)
         val, err = safe_eval(display_expr, vars_dict)
         if err is not None or val is None:
             return
         delta = abs(val - target)
-        # Solo corrispondenze ESATTE entro la tolleranza del documento.
-        # I candidati 'approx' (entro tol*10) sono stati rimossi perche'
-        # generavano rumore visivo senza essere mai veri suggerimenti utili.
         if delta <= tol:
             matches.append((display_expr, val, delta, "ok"))
 
-    # FASE 1: vicini di ciascuna sorgente nel pool
-    # Iteriamo su tutte le sorgenti: la prima e' il vicino piu' prossimo,
-    # le successive coprono i casi in cui il vicino euclideo non e' il
-    # "vicino topologico" nel tracciato.
     for src in source_list:
         for cand in neighbor_candidates_from(src):
             try_candidate(cand)
 
-    # FASE 2: fallback combinatorio (soglia alzata a 5 per essere generosi)
     if len(matches) < 5:
         var_items = list(vars_dict.items())
         for name, val in var_items:
@@ -711,12 +670,7 @@ def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
 def show_suggest_dialog(target_x, target_y, vars_dict, tol,
                         sources_x=None, sources_y=None,
                         source_ex=None, source_ey=None):
-    """Dialog 'Suggerisci'. Accetta:
-      - sources_x, sources_y: liste di formule sorgente (pool); preferite
-      - source_ex, source_ey: stringhe singole (retrocompatibilita')
-    Se entrambe le forme sono fornite, vengono unite (pool prima, singole dopo).
-    """
-    # Unifica gli input in liste
+    """Dialog 'Suggerisci'."""
     src_x_list = []
     src_y_list = []
     if sources_x:
@@ -752,7 +706,6 @@ def show_suggest_dialog(target_x, target_y, vars_dict, tol,
     lbl_info.Size = Drawing.Size(680, 22)
     form.Controls.Add(lbl_info)
 
-    # Mostra il pool di sorgenti (primi 3 per asse)
     def fmt_src(lst, max_show=3):
         if not lst:
             return "-"
@@ -787,8 +740,6 @@ def show_suggest_dialog(target_x, target_y, vars_dict, tol,
     if not matches_x:
         lst_x.Items.Add("(nessun match trovato)")
     for expr, val, delta, status in matches_x:
-        # Tutti i match sono ora 'ok' (i candidati 'approx' sono stati rimossi),
-        # quindi non serve un marker per distinguerli.
         lst_x.Items.Add("%-30s = %10s" % (expr, fmt % val))
     form.Controls.Add(lst_x)
 
@@ -850,11 +801,7 @@ def show_param_dialog(x, y, vars_dict, tol,
                       source_ex=None, source_ey=None,
                       sources_x=None, sources_y=None,
                       preset_ex="", preset_ey="", preset_note=""):
-    """Dialogo di annotazione.
-    preset_*    : valori di default nei campi (es. sovrascrittura)
-    source_ex/ey: formula sorgente singola (retrocompatibilita')
-    sources_x/y : pool di formule sorgenti, ordinato per priorita'
-                  (usato dal bottone Suggerisci)."""
+    """Dialogo di annotazione."""
     fmt = "%." + str(DECIMALS) + "f"
 
     form = WinForms.Form()
@@ -995,7 +942,6 @@ def show_param_dialog(x, y, vars_dict, tol,
     txt_x.TextChanged += on_x_changed
     txt_y.TextChanged += on_y_changed
 
-    # Triggera il feedback iniziale se i preset sono presenti
     if preset_ex:
         update_feedback(txt_x, lbl_x_feedback, x, "sx")
     if preset_ey:
@@ -1092,14 +1038,7 @@ def build_dot_text(x, y, ex, ey, note, status_x, status_y):
 #  SOVRASCRITTURA (Punto 4) - basata sulla chiave geometrica
 # -----------------------------------------------------------------------------
 def find_existing_by_key(point_key, dot_key, tol):
-    """Cerca punto e textdot esistenti con la chiave geometrica data.
-    Ritorna (point_obj, dot_obj, preset_dict) dove preset_dict contiene
-    X_param, Y_param, Nota del vecchio punto. Tutti i campi possono essere
-    None se non trovato.
-
-    Fallback: se il match esatto per nome fallisce, prova match in
-    tolleranza geometrica sulle coordinate (copre casi di chiavi che
-    differiscono di 1 mm per arrotondamento)."""
+    """Cerca punto e textdot esistenti con la chiave geometrica data."""
     idx_pts  = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
     idx_dots = sc.doc.Layers.FindByFullPath(LAYER_DOTS,   -1)
 
@@ -1107,7 +1046,6 @@ def find_existing_by_key(point_key, dot_key, tol):
     found_dot = None
     preset = {"X_param": "", "Y_param": "", "Nota": ""}
 
-    # Estraggo le coordinate dalla chiave per il fallback in tolleranza
     m = re.match(r"^PKG_X([+-])(\d+)_Y([+-])(\d+)$", point_key)
     if m:
         kx = int(m.group(2)) * (1 if m.group(1) == "+" else -1)
@@ -1115,7 +1053,7 @@ def find_existing_by_key(point_key, dot_key, tol):
     else:
         kx, ky = None, None
 
-    tol_match = max(tol, 0.001) + 0.5  # 0.5 mm di slack per arrotondamenti
+    tol_match = max(tol, 0.001) + 0.5
 
     for obj in sc.doc.Objects:
         if obj.IsDeleted:
@@ -1123,7 +1061,6 @@ def find_existing_by_key(point_key, dot_key, tol):
         layer_idx = obj.Attributes.LayerIndex
         name = obj.Attributes.Name or ""
 
-        # Match Point
         if layer_idx == idx_pts and isinstance(obj.Geometry, Rhino.Geometry.Point):
             hit = False
             if name == point_key:
@@ -1140,7 +1077,6 @@ def find_existing_by_key(point_key, dot_key, tol):
                 if preset["X_param"] == "--": preset["X_param"] = ""
                 if preset["Y_param"] == "--": preset["Y_param"] = ""
 
-        # Match TextDot
         elif layer_idx == idx_dots and isinstance(obj.Geometry, Rhino.Geometry.TextDot):
             hit = False
             if name == dot_key:
@@ -1175,7 +1111,7 @@ def show_summary_dialog(records):
         return
 
     form = WinForms.Form()
-    form.Text = "Riepilogo sessione - PKG Annotator v4"
+    form.Text = "Riepilogo sessione - PKG Annotator v4.1"
     form.Width = 780
     form.Height = 480
     form.StartPosition = WinForms.FormStartPosition.CenterScreen
@@ -1246,13 +1182,7 @@ def show_summary_dialog(records):
 #  CREAZIONE / AGGIORNAMENTO PUNTO  (v4)
 # -----------------------------------------------------------------------------
 def create_provisional_point(pt, point_key, idx_pts):
-    """Crea SUBITO il Point al clic, prima del dialogo (novita' v4).
-    Il punto nasce gia' con il suo point_key e con UserString minimi che lo
-    marcano come 'provvisorio'. Ritorna il GUID, oppure Guid.Empty se fallisce.
-
-    Questo rende il punto visibile nel viewport mentre l'utente ragiona sulla
-    formula. Se l'annotazione viene saltata/annullata, il punto verra'
-    rimosso da rollback_provisional_point()."""
+    """Crea SUBITO il Point al clic, prima del dialogo (novita' v4)."""
     fmt = "%." + str(DECIMALS) + "f"
     attr_pt = Rhino.DocObjects.ObjectAttributes()
     attr_pt.LayerIndex  = idx_pts
@@ -1265,15 +1195,18 @@ def create_provisional_point(pt, point_key, idx_pts):
         if rh_obj:
             rh_obj.Attributes.SetUserString("X_reale", fmt % pt.X)
             rh_obj.Attributes.SetUserString("Y_reale", fmt % pt.Y)
+            # FIX v4.1: scrivo pair_id gia' sul provvisorio (= point_key).
+            # E' l'identificatore geometrico stabile che l'exporter legge
+            # per popolare P1_id / P2_id / Centro_id.
+            rh_obj.Attributes.SetUserString("pair_id", point_key)
             rh_obj.Attributes.SetUserString("PKG_provvisorio", "1")
             sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
-        sc.doc.Views.Redraw()  # forza il viewport a mostrare il punto subito
+        sc.doc.Views.Redraw()
     return pt_guid
 
 
 def rollback_provisional_point(pt_guid):
-    """Cancella il punto provvisorio creato al clic, usato quando l'utente
-    salta o annulla l'annotazione (novita' v4)."""
+    """Cancella il punto provvisorio creato al clic."""
     if pt_guid is None or pt_guid == System.Guid.Empty:
         return
     sc.doc.Objects.Delete(pt_guid, True)
@@ -1297,6 +1230,9 @@ def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
     rh_obj.Attributes.SetUserString("X_status", sx)
     rh_obj.Attributes.SetUserString("Y_status", sy)
     rh_obj.Attributes.SetUserString("Nota",     note if note else "")
+    # FIX v4.1: ribadisco pair_id anche in finalizzazione, cosi' resta
+    # coerente anche se il punto e' stato creato da una versione precedente.
+    rh_obj.Attributes.SetUserString("pair_id",  point_key)
     rh_obj.Attributes.SetUserString("PKG_provvisorio", "")  # non piu' provvisorio
     rh_obj.Attributes.Name = point_key  # chiave pulita, niente nota
     sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
@@ -1337,13 +1273,9 @@ def main():
         x  = pt.X
         y  = pt.Y
 
-        # === Chiavi geometriche del nuovo punto ===
         point_key = make_point_key(x, y)
         dot_key   = make_dot_key(x, y)
 
-        # === Sovrascrittura (Punto 4): cerca e cancella eventuali duplicati ===
-        # NB: la ricerca avviene PRIMA di creare il punto provvisorio, cosi'
-        # find_existing_by_key non rischia di trovare il punto appena creato.
         old_pt_obj, old_dot_obj, preset = find_existing_by_key(point_key, dot_key, tol)
         is_overwrite = (old_pt_obj is not None)
         if is_overwrite:
@@ -1352,24 +1284,13 @@ def main():
                 point_key, n_removed)
             sc.doc.Views.Redraw()
 
-        # === VISIBILITA' AL CLIC (novita' v4) ===
-        # Creo SUBITO il punto, prima del dialogo, cosi' e' visibile nel
-        # viewport mentre ragiono sulla formula. Se poi salto/annullo, lo
-        # rimuovo con rollback_provisional_point().
         prov_guid = create_provisional_point(pt, point_key, idx_pts)
 
-        # === Reverse lookup sorgente: pool di vicini geometrici (Punto 3) ===
-        # IMPORTANTE: escludo il punto provvisorio appena creato dalla raccolta
-        # delle sorgenti. exclude_at_zero_dist=True scarta i punti a distanza
-        # ~0 dal target, quindi il provvisorio (che e' esattamente sul target)
-        # viene ignorato. Inoltre non ha ancora X_param/Y_param, quindi anche
-        # se entrasse non aggiungerebbe sorgenti.
         sources_x, sources_y = collect_source_formulas(
             pt, k_neighbors=3, exclude_at_zero_dist=True, tol=tol)
         source_ex = sources_x[0] if sources_x else None
         source_ey = sources_y[0] if sources_y else None
 
-        # Mostra dialogo. Se sovrascrittura, riproponi i valori vecchi come preset.
         expr_x, expr_y, note, sx, sy = show_param_dialog(
             x, y, vars_dict, tol,
             source_ex=source_ex, source_ey=source_ey,
@@ -1378,30 +1299,22 @@ def main():
             preset_ey=preset["Y_param"],
             preset_note=preset["Nota"])
 
-        # === Gestione esito del dialogo ===
         if expr_x is None:
-            # "Annulla tutto": rollback del provvisorio e uscita dal ciclo
             rollback_provisional_point(prov_guid)
             break
 
         if sx == "empty" and sy == "empty" and not expr_x and not expr_y and not note:
-            # "Salta": l'utente non ha annotato nulla -> rollback del provvisorio
-            # e passa al punto successivo senza creare TextDot ne' record.
             rollback_provisional_point(prov_guid)
             continue
 
-        # === Finalizza il punto provvisorio (aggiorna gli UserString) ===
         finalize_point(prov_guid, point_key, x, y, expr_x, expr_y, sx, sy, note)
 
-        # === Crea il TextDot, colore in base alla completezza (Punto 2) ===
         dot_text = build_dot_text(x, y, expr_x, expr_y, note, sx, sy)
         pt_dot   = Point3d(pt.X + DOT_OFFSET_X, pt.Y + DOT_OFFSET_Y, pt.Z)
         td       = TextDot(dot_text, pt_dot)
         td.FontHeight = DOT_HEIGHT
         td.FontFace   = DOT_FONT
 
-        # Completezza: Nota esclusa dal calcolo
-        # 'ok' e 'approx' contano come compilati; 'empty' e 'err' come mancanze
         x_complete = sx in ("ok", "approx")
         y_complete = sy in ("ok", "approx")
         dot_color = COLOR_DOT_COMPLETE if (x_complete and y_complete) else COLOR_DOT_INCOMPLETE
@@ -1410,7 +1323,7 @@ def main():
         attr_dot.LayerIndex  = idx_dots
         attr_dot.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
         attr_dot.ObjectColor = dot_color
-        attr_dot.Name = dot_key  # chiave per match diretto in sovrascrittura
+        attr_dot.Name = dot_key
 
         sc.doc.Objects.AddTextDot(td, attr_dot)
 
@@ -1428,7 +1341,7 @@ def main():
     if count > 0:
         show_summary_dialog(records)
 
-    print "PKG Annotator v4: %d punto/i creato/i o aggiornato/i." % count
+    print "PKG Annotator v4.1: %d punto/i creato/i o aggiornato/i." % count
 
 
 if __name__ == "__main__":
