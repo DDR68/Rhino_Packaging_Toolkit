@@ -1,6 +1,6 @@
 # Cartotecnica LLM Knowledge Base
 
-Knowledge base per assistenti AI (Claude, ChatGPT, Gemini, modelli locali) specializzati in cartotecnica parametrica e scripting Rhino.
+Knowledge base per assistenti AI (Claude, GROK, ChatGPT, Gemini, modelli locali) specializzati in cartotecnica parametrica e scripting Rhino.
 (Testato in Claude 4.7)
 
 ## Scopo
