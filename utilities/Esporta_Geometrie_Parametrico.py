@@ -1,13 +1,25 @@
 #! python 2
 # -*- coding: utf-8 -*-
 """
-Script: Esporta_Geometrie_Parametrico_V.5.py
+Script: Esporta_Geometrie_Parametrico.py
 Versione: 5.1
 Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscriptsyntax)
 
 UNIFICA:
   - Aggiorna_UserText_Parametrico (propagazione punti parametrici -> curve)
   - Esporta_Geometrie_Semplice V.4 (export TXT tab-separated)
+
+AGGIUNTE (robustezza e usabilita'):
+  - [Raccordi conici] Per le NURBS quadratiche (grado 2, 3 CP) salva la
+    firma di forma (CtrlProp_u, CtrlProp_v, CtrlPeso_w): il raccordo e'
+    interamente parametrico e si riadatta ai parametri.
+  - [Archi robusti] Salva Punto_medio (tre punti) + Centro_geom assoluto:
+    ricostruzione univoca, immune ad ambiguita' di verso.
+  - [Curve libere] Per le NURBS non quadratiche salva CtrlPoints (x,y,w,
+    separati da '|') + Nodi: ricostruzione geometrica esatta.
+  - [Prompt LLM] Opzione (checkbox nel dialogo) per anteporre al TXT un
+    prompt che istruisce un LLM a generare lo script parametrico dai dati.
+    Il file diventa autoportante (istruzioni + dati). Vedi _llm_prompt_header.
 
 NOVITA V.5.1 rispetto a V.5.0 (correzioni):
   - [FIX stale-ref] Dopo la propagazione (ModifyAttributes) gli oggetti curva
@@ -178,11 +190,13 @@ def show_help():
 def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
                                 n_punti_validi, n_curve_sel, n_punti_sel):
     """Mostra il report della propagazione e chiede se esportare su file.
-    Ritorna True se l'utente vuole esportare, False altrimenti."""
+    Ritorna (export, include_prompt):
+      export        = True se l'utente vuole esportare
+      include_prompt = True se vuole il prompt LLM in testa al TXT."""
     import Eto.Forms as ef
     import Eto.Drawing as ed
 
-    result = {"export": False}
+    result = {"export": False, "include_prompt": True}
 
     dlg = ef.Dialog()
     dlg.Title = "Esporta Geometrie Parametrico v5.1 - Report"
@@ -223,12 +237,18 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     question.Text = "Vuoi esportare i dati su file TXT?"
     question.Font = ed.Font(ed.SystemFont.Bold, 11)
     layout.AddRow(question)
+
+    chk_prompt = ef.CheckBox()
+    chk_prompt.Text = "Aggiungi prompt LLM in testa al file"
+    chk_prompt.Checked = True
+    layout.AddRow(chk_prompt)
     layout.AddRow(ef.Label(Text=""))
 
     btn_export = ef.Button()
     btn_export.Text = "Si, esporta su file"
     def on_export(s, e):
         result["export"] = True
+        result["include_prompt"] = bool(chk_prompt.Checked)
         dlg.Close()
     btn_export.Click += on_export
 
@@ -244,7 +264,7 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     dlg.Content = layout
     dlg.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow)
 
-    return result["export"]
+    return result["export"], result["include_prompt"]
 
 
 # ============================================================
@@ -903,7 +923,68 @@ def _refetch(obj):
     return obj
 
 
-def export_objects(curve_objs, point_objs):
+def _llm_prompt_header():
+    """Testo del prompt da anteporre al TXT quando l'utente lo richiede.
+    Rende il file autoportante: chi lo riceve (un LLM) ha davanti sia le
+    istruzioni sia i dati per generare lo script parametrico.
+
+    Tenuto come costante qui per facilita' di modifica e per evitare
+    dipendenze da file esterni (robustezza per uno strumento condiviso).
+    Se in futuro si vorra' caricarlo da un .md esterno, questo e' l'unico
+    punto da cambiare."""
+    return (
+        "=== ISTRUZIONI PER LA GENERAZIONE DELLO SCRIPT PARAMETRICO ===\n"
+        "\n"
+        "Scrivi professionalmente uno script per Rhino 7 e 8 (IronPython 2.7,\n"
+        "RhinoCommon, prima riga \"#! python 2\") che generi il packaging\n"
+        "descritto piu' sotto in modo PARAMETRICO, mantenendo l'unita di\n"
+        "misura in mm.\n"
+        "\n"
+        "Specifiche di stile e convenzioni del toolkit (apri se hai accesso web):\n"
+        "- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/"
+        "refs/heads/main/docs/llm-knowledge/prompts/ironpython-examples.md\n"
+        "- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/"
+        "refs/heads/main/docs/llm-knowledge/prompts/rhino-ironpython.md\n"
+        "Se NON puoi accedere ai link, segui comunque queste regole minime:\n"
+        "solo RhinoCommon e scriptcontext (no rhinoscriptsyntax), niente\n"
+        "f-string, stringhe in formato %, header UTF-8, selezione via\n"
+        "Rhino.Input.Custom.\n"
+        "\n"
+        "COME LEGGERE I DATI CHE SEGUONO\n"
+        "- Ogni riga e' un oggetto geometrico, colonne separate da TAB.\n"
+        "- Le variabili packaging (es. L, P, A, S, C, T, E) hanno valori\n"
+        "  definiti nel disegno; le formule nel blocco UserText le combinano.\n"
+        "- Il blocco UserText (ultima colonna) contiene le coppie chiave=valore\n"
+        "  che definiscono il RAPPORTO PARAMETRICO di ogni geometria:\n"
+        "    Linea   -> P1_param, P2_param  (estremi come formule)\n"
+        "    Cerchio -> Centro_param, Raggio\n"
+        "    Arco    -> P1_param, P2_param, Punto_medio (tre punti), Raggio\n"
+        "    Raccordo conico -> P1_param, P2_param, CtrlProp_u, CtrlProp_v,\n"
+        "                       CtrlPeso_w\n"
+        "    Curva libera    -> CtrlPoints (x,y,w | ...), Nodi, Grado\n"
+        "- Le coordinate X1,Y1,X2,Y2 sono i valori NUMERICI attuali (per\n"
+        "  riferimento); la forma parametrica sta nelle formule del blocco\n"
+        "  UserText.\n"
+        "\n"
+        "COSA DEVI PRODURRE\n"
+        "Uno script che definisca le variabili in testa (cosi' che\n"
+        "modificandole il disegno si riscali), costruisca tutte le geometrie\n"
+        "dalle loro formule, e le disegni nei layer corretti (Taglio,\n"
+        "Cordone, MezzoTaglio, Foratore).\n"
+        "\n"
+        "AUTO-VERIFICA (obbligatoria)\n"
+        "Al termine, controlla lo script confrontando la geometria che produce\n"
+        "con i dati qui sotto: per ogni punto, verifica che la formula\n"
+        "valutata coi valori delle variabili ridia le coordinate numeriche\n"
+        "indicate; per archi e raccordi verifica estremi, raggio e lato.\n"
+        "Segnala e CORREGGI ogni inesattezza prima di restituire la versione\n"
+        "finale.\n"
+        "\n"
+        "=== GEOMETRIE E RAPPORTI PARAMETRICI DEL PACKAGING ===\n"
+    )
+
+
+def export_objects(curve_objs, point_objs, include_prompt=False):
     """Genera il contenuto TXT e lo salva."""
     lines = []
     rows = []
@@ -982,6 +1063,11 @@ def export_objects(curve_objs, point_objs):
     filepath = fd.FileName
     content = "\n".join(lines)
 
+    # Prompt LLM in testa, se richiesto dall'utente. Va PRIMA delle righe
+    # commentate '#' e dei dati, cosi' l'LLM legge prima le istruzioni.
+    if include_prompt:
+        content = _llm_prompt_header() + "\n" + content
+
     with open(filepath, "w") as f:
         f.write(content)
 
@@ -1032,15 +1118,16 @@ def main():
             curve_objs)
 
     if curve_objs:
-        do_export = show_report_and_ask_export(
+        do_export, include_prompt = show_report_and_ask_export(
             n_aggiornate, n_saltate, reasons,
             n_punti_validi, len(curve_objs), len(point_objs))
     else:
-        do_export = True
+        # senza curve, esporto i soli punti; il prompt LLM ha senso comunque
+        do_export, include_prompt = True, True
 
     if do_export:
         print("-" * 60)
-        export_objects(curve_objs, point_objs)
+        export_objects(curve_objs, point_objs, include_prompt=include_prompt)
     else:
         print("-" * 60)
         print("Propagazione completata. Nessun export su file.")
