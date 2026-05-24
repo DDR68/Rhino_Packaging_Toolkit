@@ -2,37 +2,44 @@
 # -*- coding: utf-8 -*-
 """
 Script: Esporta_Geometrie_Parametrico_V.5.py
-Versione: 5.0
+Versione: 5.1
 Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscriptsyntax)
 
 UNIFICA:
   - Aggiorna_UserText_Parametrico (propagazione punti parametrici -> curve)
   - Esporta_Geometrie_Semplice V.4 (export TXT tab-separated)
 
+NOVITA V.5.1 rispetto a V.5.0 (correzioni):
+  - [FIX stale-ref] Dopo la propagazione (ModifyAttributes) gli oggetti curva
+    vengono RI-LETTI dal documento via FindId(obj.Id) prima dell'export.
+    In V.5.0 l'export rileggeva lo UserText dallo stesso riferimento Python
+    catturato prima della modifica: in RhinoCommon quel riferimento puo'
+    essere stale e restituire attributi non aggiornati, producendo
+    UserText='-' nel TXT pur dopo una propagazione riuscita.
+  - [FIX angoli] La propagazione (_ut_for_arc) ora applica la STESSA
+    convenzione di segno dell'export: arco CW (Plane.Normal.Z<0) -> angoli
+    negativi. In V.5.0 la propagazione scriveva angoli RAW e l'export li
+    invertiva, generando due rappresentazioni discordanti nello stesso file.
+  - [FIX pulizia] Prima di scrivere il nuovo UserText parametrico su una
+    curva, le chiavi parametriche precedenti vengono rimosse (PARAM_KEYS),
+    cosi' un arco ri-elaborato come 'parziale' non conserva un Centro_id
+    della passata precedente.
+  - [FIX pair_id fallback] _collect_param_points: se il punto non ha la
+    chiave 'pair_id' (annotato con PKG_Annotator < v4.1), l'id viene
+    ricostruito dalle coordinate con lo stesso schema dell'annotator
+    (PKG_X+0100_Y+0000), garantendo retrocompatibilita'.
+
 NOVITA V.5 rispetto a V.4:
-  - Prima dell'export, propaga automaticamente le espressioni parametriche
-    dai punti del layer PKG_Punti_Parametrici alle curve della selezione.
-  - Ogni curva che ha entrambi gli estremi coincidenti con un punto
-    parametrico (snap esatto <= 0.001 mm) riceve nello User Text:
-      Comando, Tipo_Originale, P1_param, P2_param, P1_id, P2_id,
-      Lunghezza/Raggio/Centro_param/AngStart/AngEnd a seconda del tipo,
-      Status (associato | parziale).
-  - L'utente puo' scegliere se propagare prima di esportare via dialog.
-  - Le geometrie senza match completo NON ricevono user text (skip).
+  - Prima dell'export, propaga le espressioni parametriche dai punti del
+    layer PKG_Punti_Parametrici alle curve della selezione.
   - I punti parametrici con X_status o Y_status diversi da 'ok' sono
     esclusi dal pool sorgente.
 
 WORKFLOW:
-  1. Seleziona le curve da esportare (i punti parametrici vengono
-     letti automaticamente dal layer PKG_Punti_Parametrici).
+  1. Seleziona le curve da esportare.
   2. Lancia lo script.
-  3. Scegli se propagare prima dell'export.
+  3. Scegli se esportare dopo il report di propagazione.
   4. Seleziona il path del TXT di output.
-
-Classifica ogni curva per tipo (T/C/M/F) da layer e colore.
-Esplode PolyCurve in segmenti elementari.
-Archi: angoli con segno (Normal.Z<0 = sweep CW).
-NURBS razionali: pesi CP nel formato x,y,w.
 """
 
 import Rhino
@@ -52,6 +59,21 @@ ROUND_DIGITS    = 3       # cifre per chiave dizionario (coerente con TOL_SNAP)
 LAYER_PUNTI     = "PKG_Punti_Parametrici"
 STATUS_OK       = "ok"    # valore atteso in X_status / Y_status
 
+# FIX v5.1: chiavi parametriche scritte dalla propagazione. Servono per
+# ripulire lo UserText di una curva prima di riscriverlo, evitando residui
+# di una passata precedente (es. Centro_id rimasto su un arco diventato
+# parziale).
+PARAM_KEYS = [
+    "Comando", "Tipo_Originale",
+    "P1_param", "P2_param", "P1_id", "P2_id",
+    "Centro_param", "Centro_id", "Centro_geom", "Punto_medio",
+    "Raggio", "Circonferenza",
+    "AngStart_deg", "AngEnd_deg", "Verso",
+    "CtrlProp_u", "CtrlProp_v", "CtrlPeso_w", "CtrlOff_x", "CtrlOff_y",
+    "CtrlPoints", "Nodi",
+    "Lunghezza", "Grado", "NumPunti", "Nota", "Status",
+]
+
 
 # ============================================================
 #  HELP DIALOG (Eto.Forms)
@@ -63,7 +85,7 @@ def show_help():
     import Eto.Drawing as ed
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.0 - Guida"
+    dlg.Title = "Esporta Geometrie Parametrico v5.1 - Guida"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(680, 560)
     dlg.Resizable = True
@@ -73,7 +95,7 @@ def show_help():
     layout.DefaultSpacing = ed.Size(4, 4)
 
     title = ef.Label()
-    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.0"
+    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.1"
     title.Font = ed.Font(ed.SystemFont.Bold, 13)
     layout.AddRow(title)
     layout.AddRow(ef.Label(Text=""))
@@ -85,9 +107,8 @@ def show_help():
 
     uso = ef.Label()
     uso.Text = ("1. Selezionare curve e/o punti da esportare.\n"
-                "2. Lo script propone di propagare le espressioni "
-                "parametriche\n   dai punti del layer "
-                "'PKG_Punti_Parametrici' verso le curve.\n"
+                "2. Lo script propaga le espressioni parametriche\n"
+                "   dai punti del layer 'PKG_Punti_Parametrici' alle curve.\n"
                 "3. Viene generato un TXT tab-separated con una riga "
                 "per oggetto/segmento\n   e la colonna UserText "
                 "popolata con le espressioni parametriche.")
@@ -100,10 +121,10 @@ def show_help():
     layout.AddRow(sec_par)
 
     par = ef.Label()
-    par.Text = ("Per ogni curva della selezione, lo script cerca punti "
-                "parametrici\nche coincidano (snap <= 0.001 mm) con i suoi "
-                "estremi. Se entrambi\ngli estremi hanno un match, scrive "
-                "nello user text della curva:\n"
+    par.Text = ("Per ogni curva, lo script cerca punti parametrici che "
+                "coincidano\n(snap <= 0.001 mm) con i suoi estremi. Se "
+                "entrambi gli estremi\nhanno un match, scrive nello user "
+                "text della curva:\n"
                 "  Comando        es. _Line, _Arc, _Circle, _InterpCrv\n"
                 "  Tipo_Originale Line / Arc / Circle / Nurbs\n"
                 "  P1_param       espressione del punto iniziale\n"
@@ -137,9 +158,11 @@ def show_help():
     fmt_label.Text = ("Header:\n"
                 "  # file.3dm | bbox: WxH | obj: N | segm: M | unita: ...\n"
                 "  # Colonne: ID Tipo Geom Nome Layer X1 Y1 X2 Y2 R CX CY "
-                "AngS AngE Len UserText\n\n"
+                "AngS AngE Len ...\n\n"
                 "UserText: pairs concatenati con ';', formato chiave=valore.\n"
-                "Valori vuoti = '-'. Decimali con punto.")
+                "Valori vuoti = '-'. Decimali con punto.\n"
+                "Angoli archi: convenzione con segno (CW = negativo) coerente\n"
+                "tra UserText e colonne.")
     layout.AddRow(fmt_label)
     layout.AddRow(ef.Label(Text=""))
 
@@ -154,17 +177,15 @@ def show_help():
 
 def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
                                 n_punti_validi, n_curve_sel, n_punti_sel):
-    """
-    Mostra il report della propagazione e chiede se esportare su file.
-    Ritorna True se l'utente vuole esportare, False altrimenti.
-    """
+    """Mostra il report della propagazione e chiede se esportare su file.
+    Ritorna True se l'utente vuole esportare, False altrimenti."""
     import Eto.Forms as ef
     import Eto.Drawing as ed
 
     result = {"export": False}
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.0 - Report"
+    dlg.Title = "Esporta Geometrie Parametrico v5.1 - Report"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(480, 320)
     dlg.Resizable = False
@@ -179,7 +200,6 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     layout.AddRow(title)
     layout.AddRow(ef.Label(Text=""))
 
-    # Costruisce il testo del report
     report_lines = []
     report_lines.append("Selezione: %d curve, %d punti" % (n_curve_sel, n_punti_sel))
     report_lines.append("Punti parametrici sorgente: %d (layer '%s')" % (
@@ -199,7 +219,6 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     layout.AddRow(report)
     layout.AddRow(ef.Label(Text=""))
 
-    # Domanda di esportazione
     question = ef.Label()
     question.Text = "Vuoi esportare i dati su file TXT?"
     question.Font = ed.Font(ed.SystemFont.Bold, 11)
@@ -232,6 +251,17 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
 #  PROPAGAZIONE PARAMETRICA - HELPERS
 # ============================================================
 
+def make_pair_id_from_xy(x, y):
+    """FIX v5.1: ricostruisce il pair_id con lo STESSO schema di
+    PKG_Annotator.make_point_key, per i punti annotati prima della v4.1
+    (che non scrivevano la chiave 'pair_id')."""
+    ix = int(round(x))
+    iy = int(round(y))
+    sx = "+" if ix >= 0 else "-"
+    sy = "+" if iy >= 0 else "-"
+    return "PKG_X%s%04d_Y%s%04d" % (sx, abs(ix), sy, abs(iy))
+
+
 def _parse_user_text_dict(rh_object):
     """Restituisce un dict dallo user text di un RhinoObject."""
     result = {}
@@ -249,23 +279,27 @@ def _parse_user_text_dict(rh_object):
 
 
 def _write_user_text(rh_object, data_dict):
-    """
-    Scrive un dict come user text sull'oggetto.
+    """Scrive un dict come user text sull'oggetto.
     USA Duplicate() perche' altrimenti ModifyAttributes e' un no-op silenzioso.
-    """
+    FIX v5.1: prima rimuove le chiavi parametriche precedenti (PARAM_KEYS),
+    cosi' non restano residui di una passata anteriore."""
     if rh_object is None or not data_dict:
         return False
     new_attrs = rh_object.Attributes.Duplicate()
+    # Pulizia chiavi parametriche stale
+    for k in PARAM_KEYS:
+        try:
+            new_attrs.DeleteUserString(k)
+        except Exception:
+            pass
     for k, v in data_dict.items():
         new_attrs.SetUserString(k, "%s" % v)
     return sc.doc.Objects.ModifyAttributes(rh_object, new_attrs, True)
 
 
 def _collect_param_points():
-    """
-    Costruisce { (x_round, y_round) : {param_x, param_y, pair_id} }
-    leggendo i punti del layer LAYER_PUNTI con X_status=ok e Y_status=ok.
-    """
+    """Costruisce { (x_round, y_round) : {param_x, param_y, pair_id} }
+    leggendo i punti del layer LAYER_PUNTI con X_status=ok e Y_status=ok."""
     points_map = {}
     skipped_orphan = 0
 
@@ -295,10 +329,16 @@ def _collect_param_points():
         loc = pt_geom.Location
         key = (round(loc.X, ROUND_DIGITS), round(loc.Y, ROUND_DIGITS))
 
+        # FIX v5.1: pair_id da UserString; se assente (annotator < v4.1)
+        # lo ricostruisco dalle coordinate con lo schema dell'annotator.
+        pid = ut.get("pair_id", "")
+        if not pid:
+            pid = make_pair_id_from_xy(loc.X, loc.Y)
+
         points_map[key] = {
             "param_x": ut.get("X_param", "?"),
             "param_y": ut.get("Y_param", "?"),
-            "pair_id": ut.get("pair_id", ""),
+            "pair_id": pid,
         }
 
     return points_map, skipped_orphan, True
@@ -315,6 +355,18 @@ def _fmt_param_expr(entry):
     if entry is None:
         return "non_associato"
     return "(%s, %s)" % (entry["param_x"], entry["param_y"])
+
+
+def _signed_angles_deg(arc):
+    """FIX v5.1: angoli inizio/fine in gradi con la convenzione di segno
+    usata anche dall'export: arco CW (Plane.Normal.Z<0) -> angoli negativi.
+    Ritorna (start_deg, end_deg)."""
+    start_deg = math.degrees(arc.StartAngle)
+    end_deg   = math.degrees(arc.EndAngle)
+    if arc.Plane.Normal.Z < 0:
+        start_deg = -start_deg
+        end_deg   = -end_deg
+    return start_deg, end_deg
 
 
 # ============================================================
@@ -335,6 +387,7 @@ def _ut_for_line(p1_entry, p2_entry, line):
 
 
 def _ut_for_arc(p1_entry, p2_entry, arc, centro_entry):
+    start_deg, end_deg = _signed_angles_deg(arc)  # FIX v5.1: segno coerente
     data = {
         "Comando":         "_Arc",
         "Tipo_Originale":  "Arc",
@@ -344,14 +397,28 @@ def _ut_for_arc(p1_entry, p2_entry, arc, centro_entry):
         "P2_id":           p2_entry["pair_id"],
         "Centro_param":    _fmt_param_expr(centro_entry),
         "Raggio":          "%.4f" % arc.Radius,
-        "AngStart_deg":    "%.4f" % Rhino.RhinoMath.ToDegrees(arc.StartAngle),
-        "AngEnd_deg":      "%.4f" % Rhino.RhinoMath.ToDegrees(arc.EndAngle),
+        "AngStart_deg":    "%.4f" % start_deg,
+        "AngEnd_deg":      "%.4f" % end_deg,
         "Lunghezza":       "%.4f" % arc.Length,
         "Verso":           "CW" if arc.Plane.Normal.Z < 0 else "CCW",
         "Status":          "associato" if centro_entry is not None else "parziale",
     }
     if centro_entry is not None:
         data["Centro_id"] = centro_entry["pair_id"]
+    # ROBUSTEZZA (toolkit condiviso): salva SEMPRE il centro geometrico
+    # assoluto, anche quando non e' un punto annotato. Dati due estremi +
+    # raggio esistono fino a 4 archi possibili (centro su un lato o l'altro
+    # della corda, arco minore o maggiore): il solo Verso non basta a
+    # disambiguare. Il centro esplicito + raggio + estremi rende la
+    # ricostruzione univoca in ogni caso, indipendentemente dal tipo di
+    # scatola. Coordinate assolute in mm (non parametriche).
+    data["Centro_geom"] = "%.6f,%.6f" % (arc.Center.X, arc.Center.Y)
+    # Punto a META' arco: consente la ricostruzione canonica a TRE PUNTI
+    # (start, mid, end) con rg.Arc(p_start, p_mid, p_end), che e' univoca
+    # e immune alle ambiguita' di piano/segno/verso. E' la via piu' solida
+    # per archi generici (non solo semicerchi).
+    mid_pt = arc.PointAt((arc.StartAngle + arc.EndAngle) * 0.5)
+    data["Punto_medio"] = "%.6f,%.6f" % (mid_pt.X, mid_pt.Y)
     return data
 
 
@@ -367,8 +434,99 @@ def _ut_for_circle(circle, centro_entry):
     }
 
 
-def _ut_for_nurbs(p1_entry, p2_entry, nurbs):
+TOL_DEGEN = 1e-6   # soglia per estremi allineati su un asse (dx o dy nulli)
+
+
+def _conic_proportion(nurbs):
+    """Per una Bezier quadratica (grado 2, 3 punti di controllo) calcola la
+    FIRMA DI FORMA del raccordo: la terna (u, v, w).
+
+      u, v = posizione del punto di controllo intermedio come frazione del
+             rettangolo definito dai due estremi: u sull'asse X, v sull'asse Y.
+             Sono ADIMENSIONALI: la stessa curva si riadatta a qualsiasi
+             rettangolo definito dai due estremi parametrici.
+      w    = peso del punto di controllo intermedio. Se w=1 la curva e' una
+             parabola; se w!=1 e' una conica (arco di ellisse/iperbole).
+             Senza w il raccordo non e' ricostruibile fedelmente.
+
+    Caso degenere: raccordo tra estremi allineati su un asse (parallele).
+    Se dx~0 oppure dy~0, la frazione su quell'asse non e' definita: viene
+    marcata 'degenere' e si salva l'offset assoluto del CP come fallback,
+    cosi' la ricostruzione resta possibile senza divisione per zero.
+
+    Ritorna un dict di stringhe gia' pronte per lo UserText, o None se la
+    curva non e' una quadratica a 3 CP (in tal caso il raccordo resta
+    gestito come prima, con i soli estremi parametrici)."""
+    if nurbs.Degree != 2 or nurbs.Points.Count != 3:
+        return None
+
+    p1 = nurbs.Points[0].Location
+    cp = nurbs.Points[1].Location
+    p2 = nurbs.Points[2].Location
+
+    # peso del CP intermedio (Weight e' 1.0 per le curve non razionali)
+    try:
+        w = nurbs.Points[1].Weight
+    except Exception:
+        w = 1.0
+
+    dx = p2.X - p1.X
+    dy = p2.Y - p1.Y
+
+    data = {"CtrlPeso_w": "%.6f" % w}
+
+    if abs(dx) > TOL_DEGEN:
+        data["CtrlProp_u"] = "%.6f" % ((cp.X - p1.X) / dx)
+    else:
+        data["CtrlProp_u"] = "degenere"
+        data["CtrlOff_x"]  = "%.6f" % (cp.X - p1.X)
+
+    if abs(dy) > TOL_DEGEN:
+        data["CtrlProp_v"] = "%.6f" % ((cp.Y - p1.Y) / dy)
+    else:
+        data["CtrlProp_v"] = "degenere"
+        data["CtrlOff_y"]  = "%.6f" % (cp.Y - p1.Y)
+
+    return data
+
+
+def _nurbs_full_cp(nurbs):
+    """ROBUSTEZZA (toolkit condiviso): serializza i punti di controllo
+    completi di una NURBS, con coordinate, peso e vettore dei nodi.
+    Serve per le curve che NON sono quadratiche a 3 CP (grado 3+, spline a
+    piu' campate): per queste la firma (u,v,w) non basta, ma salvando tutti
+    i CP + pesi + nodi la forma resta ricostruibile al 100% (in forma
+    geometrica esatta, non parametrica). Coordinate assolute in mm.
+
+    Formato CtrlPoints: 'x,y,w;x,y,w;...'
+    Formato Nodi: 't0;t1;...' (knot vector)."""
+    cps = []
+    for i in range(nurbs.Points.Count):
+        cp = nurbs.Points[i]
+        loc = cp.Location
+        try:
+            w = cp.Weight
+        except Exception:
+            w = 1.0
+        cps.append("%.6f,%.6f,%.6f" % (loc.X, loc.Y, w))
+    knots = []
+    try:
+        for i in range(nurbs.Knots.Count):
+            knots.append("%.6f" % nurbs.Knots[i])
+    except Exception:
+        pass
+    # Separatore '|' tra punti/nodi: sopravvive alla sanitizzazione di
+    # get_user_text (che converte ';' in ',' per non rompere il formato TXT).
+    # Usare ';' qui corromperebbe i dati. Dentro ogni punto, ',' separa
+    # x,y,w (la sanitize non tocca le virgole interne ai valori).
     return {
+        "CtrlPoints": "|".join(cps),
+        "Nodi":       "|".join(knots),
+    }
+
+
+def _ut_for_nurbs(p1_entry, p2_entry, nurbs):
+    data = {
         "Comando":         "_InterpCrv",
         "Tipo_Originale":  "Nurbs",
         "P1_param":        _fmt_param_expr(p1_entry),
@@ -378,9 +536,22 @@ def _ut_for_nurbs(p1_entry, p2_entry, nurbs):
         "Grado":           "%d" % nurbs.Degree,
         "NumPunti":        "%d" % nurbs.Points.Count,
         "Lunghezza":       "%.4f" % nurbs.GetLength(),
-        "Nota":            "Raccordo: estremi parametrici, CP interni non parametrizzati",
         "Status":          "associato",
     }
+
+    # Per le quadratiche a 3 CP il raccordo e' INTERAMENTE parametrico:
+    # estremi + firma di forma (u, v, w), e si riadatta quando cambiano i
+    # parametri. Per gli altri gradi salviamo i CP completi: la forma e'
+    # ricostruibile esattamente, anche se fissa (non riscalabile).
+    prop = _conic_proportion(nurbs)
+    if prop is not None:
+        data.update(prop)
+        data["Nota"] = "Raccordo conico: estremi + proporzione (u,v) e peso w del controllo"
+    else:
+        data.update(_nurbs_full_cp(nurbs))
+        data["Nota"] = "Curva libera: CP completi (x,y,w) + nodi per ricostruzione esatta"
+
+    return data
 
 
 # ============================================================
@@ -388,15 +559,12 @@ def _ut_for_nurbs(p1_entry, p2_entry, nurbs):
 # ============================================================
 
 def _process_curve_for_param(obj, points_map):
-    """
-    Analizza un RhinoObject curva e se entrambi gli estremi matchano
-    ritorna (dict_da_scrivere, esito). Altrimenti (None, motivo).
-    """
+    """Analizza un RhinoObject curva; se entrambi gli estremi matchano
+    ritorna (dict_da_scrivere, esito). Altrimenti (None, motivo)."""
     curve = obj.Geometry
     if not isinstance(curve, rg.Curve):
         return None, "non_curve"
 
-    # Cerchio
     is_circle, circle = curve.TryGetCircle(Rhino.RhinoMath.ZeroTolerance)
     if is_circle:
         c_entry = _lookup_param(points_map, circle.Center.X, circle.Center.Y)
@@ -404,7 +572,6 @@ def _process_curve_for_param(obj, points_map):
             return None, "circle_centro_orfano"
         return _ut_for_circle(circle, c_entry), "ok"
 
-    # Arco
     is_arc, arc = curve.TryGetArc(Rhino.RhinoMath.ZeroTolerance)
     if is_arc:
         p1_entry = _lookup_param(points_map, arc.StartPoint.X, arc.StartPoint.Y)
@@ -414,7 +581,6 @@ def _process_curve_for_param(obj, points_map):
         c_entry = _lookup_param(points_map, arc.Center.X, arc.Center.Y)
         return _ut_for_arc(p1_entry, p2_entry, arc, c_entry), "ok"
 
-    # Linea (LineCurve, PolylineCurve a singolo segmento, NurbsCurve linear)
     if curve.IsLinear(Rhino.RhinoMath.ZeroTolerance):
         p_start = curve.PointAtStart
         p_end   = curve.PointAtEnd
@@ -425,7 +591,6 @@ def _process_curve_for_param(obj, points_map):
             return None, "line_estremo_orfano"
         return _ut_for_line(p1_entry, p2_entry, line), "ok"
 
-    # NURBS / Polilinee multi-segmento / curve generiche
     is_nurbs_like = (
         isinstance(curve, rg.NurbsCurve) or
         isinstance(curve, rg.PolylineCurve) or
@@ -447,16 +612,8 @@ def _process_curve_for_param(obj, points_map):
 
 
 def propaga_parametrico(curve_objs):
-    """
-    Esegue la propagazione sui curve_objs forniti.
-
-    I punti parametrici vengono letti da TUTTO il documento (layer
-    LAYER_PUNTI), non solo dalla selezione: questo permette di
-    selezionare solo le curve da parametrizzare senza dover includere
-    i punti.
-
-    Ritorna (n_aggiornate, n_saltate, reasons_dict, n_punti_validi).
-    """
+    """Esegue la propagazione sui curve_objs forniti.
+    Ritorna (n_aggiornate, n_saltate, reasons_dict, n_punti_validi)."""
     print("-" * 60)
     print("PROPAGAZIONE PARAMETRICA")
     print("Tolleranza snap: %.4f mm | Layer punti: %s" % (
@@ -504,7 +661,7 @@ def propaga_parametrico(curve_objs):
 
 
 # ============================================================
-#  EXPORT - HELPERS (dal V.4, invariati)
+#  EXPORT - HELPERS (dal V.4)
 # ============================================================
 
 def fmt(val, decimals=2):
@@ -594,7 +751,7 @@ def explode_curve(curve):
 
 
 def extract_arc_data(curve):
-    """Estrae i dati di un arco con segno corretto."""
+    """Estrae i dati di un arco con segno corretto (CW = negativo)."""
     success, arc = curve.TryGetArc()
     if not success:
         return None
@@ -672,8 +829,9 @@ COLUMNS = ["ID", "Tipo", "Geom", "Nome", "Layer",
            "Len", "Deg", "Pts", "CP", "Sampled", "UserText"]
 
 
-def row_for_point(idx, obj):
+def row_for_point(idx, obj, usertext_override=None):
     pt = obj.Geometry.Location
+    ut = usertext_override if usertext_override is not None else get_user_text(obj)
     row = {
         "ID": str(idx),
         "Tipo": "P",
@@ -683,15 +841,16 @@ def row_for_point(idx, obj):
         "X1": fmt(pt.X),
         "Y1": fmt(pt.Y),
         "X2": fmt(pt.Z),
-        "UserText": get_user_text(obj),
+        "UserText": ut,
     }
     return row
 
 
-def row_for_segment(idx, obj, segment, tipo):
+def row_for_segment(idx, obj, segment, tipo, usertext_override=None):
     p0 = segment.PointAtStart
     p1 = segment.PointAtEnd
     geom_tag, extra = detect_geometry(segment)
+    ut = usertext_override if usertext_override is not None else get_user_text(obj)
 
     row = {
         "ID": str(idx),
@@ -704,7 +863,7 @@ def row_for_segment(idx, obj, segment, tipo):
         "X2": fmt(p1.X),
         "Y2": fmt(p1.Y),
         "Len": fmt(segment.GetLength()),
-        "UserText": get_user_text(obj),
+        "UserText": ut,
     }
 
     if "R" in extra:        row["R"]       = fmt(extra["R"])
@@ -731,6 +890,19 @@ def format_row(row):
 #  EXPORT - SCRITTURA FILE
 # ============================================================
 
+def _refetch(obj):
+    """FIX v5.1: ri-legge l'oggetto dal documento via Id, cosi' gli
+    Attributes (e lo UserText appena scritto in propagazione) sono freschi.
+    Se il refetch fallisce, ritorna l'oggetto originale come fallback."""
+    try:
+        fresh = sc.doc.Objects.FindId(obj.Id)
+        if fresh is not None:
+            return fresh
+    except Exception:
+        pass
+    return obj
+
+
 def export_objects(curve_objs, point_objs):
     """Genera il contenuto TXT e lo salva."""
     lines = []
@@ -742,6 +914,7 @@ def export_objects(curve_objs, point_objs):
 
     # Punti
     for obj in point_objs:
+        obj = _refetch(obj)  # FIX v5.1
         pt = obj.Geometry.Location
         bb = rg.BoundingBox(pt, pt)
         all_bbox.Union(bb)
@@ -751,8 +924,10 @@ def export_objects(curve_objs, point_objs):
 
     # Curve
     for obj in curve_objs:
+        obj = _refetch(obj)  # FIX v5.1: attributi/usertext freschi
         curve = obj.Geometry
         tipo = classify_curve(obj)
+        ut = get_user_text(obj)  # letto UNA volta dall'oggetto fresco
         bb = curve.GetBoundingBox(True)
         if bb.IsValid:
             all_bbox.Union(bb)
@@ -761,7 +936,7 @@ def export_objects(curve_objs, point_objs):
                                   or isinstance(curve, rg.PolylineCurve)):
             n_exploded += 1
         for seg in segments:
-            rows.append(row_for_segment(idx, obj, seg, tipo))
+            rows.append(row_for_segment(idx, obj, seg, tipo, usertext_override=ut))
             idx += 1
             n_total += 1
 
@@ -784,6 +959,7 @@ def export_objects(curve_objs, point_objs):
                  "exploded: %d | unita: %s" % (
         doc_name, bbox_str, n_curves, n_points, n_total, n_exploded, unit))
     lines.append("# Tipo: T=Taglio C=Cordone M=MezzoTaglio F=Foratore P=Point")
+    lines.append("# Angoli archi: convenzione con segno (CW = negativo)")
     lines.append("# Colonne: " + "  ".join(COLUMNS))
 
     for r in rows:
@@ -825,7 +1001,7 @@ def export_objects(curve_objs, point_objs):
 
 def main():
     print("=" * 60)
-    print("ESPORTA GEOMETRIE PARAMETRICO v5.0")
+    print("ESPORTA GEOMETRIE PARAMETRICO v5.1")
     print("=" * 60)
 
     selected = list(sc.doc.Objects.GetSelectedObjects(False, False))
@@ -846,7 +1022,6 @@ def main():
     print("Oggetti selezionati: %d curve, %d punti" % (
         len(curve_objs), len(point_objs)))
 
-    # Step 1: propagazione automatica (idempotente, sempre eseguita se ci sono curve)
     n_aggiornate = 0
     n_saltate    = 0
     reasons      = {}
@@ -856,16 +1031,13 @@ def main():
         n_aggiornate, n_saltate, reasons, n_punti_validi = propaga_parametrico(
             curve_objs)
 
-    # Step 2: report + domanda di export
     if curve_objs:
         do_export = show_report_and_ask_export(
             n_aggiornate, n_saltate, reasons,
             n_punti_validi, len(curve_objs), len(point_objs))
     else:
-        # Solo punti selezionati: nessuna propagazione, vai diretto a chiedere
         do_export = True
 
-    # Step 3: export su file se richiesto
     if do_export:
         print("-" * 60)
         export_objects(curve_objs, point_objs)
