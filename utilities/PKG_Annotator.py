@@ -254,8 +254,15 @@ def save_params_to_doc(vars_dict):
 
 
 # -----------------------------------------------------------------------------
-def show_params_dialog():
+def show_params_dialog(preset=None, conflict_names=None):
+    """Dialog parametri. 'preset' (opzionale): valori derivati dalle QUOTE di
+    definizione (testo quota = nome variabile); hanno precedenza sui valori
+    del documento e sono evidenziati in azzurro. 'conflict_names': variabili
+    con quote discordi, evidenziate in ROSSO perche' il valore proposto (il
+    piu' frequente) va controllato dall'utente."""
     doc_params = load_params_from_doc()
+    preset = preset or {}
+    conflict_names = conflict_names or set()
 
     form = WinForms.Form()
     form.Text = "Parametri Packaging - Configurazione"
@@ -298,7 +305,13 @@ def show_params_dialog():
         txt.Font = Drawing.Font("Consolas", 10)
         txt.Location = Drawing.Point(58, y - 2)
         txt.Size = Drawing.Size(90, 24)
-        if name in doc_params:
+        if name in conflict_names:
+            txt.Text = "%g" % preset.get(name, VAR_DEFAULTS[name])
+            txt.BackColor = Drawing.Color.FromArgb(250, 220, 220)   # rosso: quote discordi
+        elif name in preset:
+            txt.Text = "%g" % preset[name]
+            txt.BackColor = Drawing.Color.FromArgb(224, 238, 250)   # azzurro: da quota
+        elif name in doc_params:
             txt.Text = "%g" % doc_params[name]
             txt.BackColor = Drawing.Color.FromArgb(232, 245, 232)
         else:
@@ -1596,6 +1609,462 @@ def mirror_tagged_curves(tol):
                              WinForms.MessageBoxIcon.Information)
 
 
+# =============================================================================
+#  QUOTE-FUNZIONE (v4.3): lettura LinearDimension con testo sovrascritto
+# =============================================================================
+def _dim_info(obj, tol):
+    """Estrae da una LinearDimension: punti di definizione (mondo), asse di
+    misura ('X' orizzontale, 'Y' verticale, 'D' obliqua) e testo sovrascritto.
+    Ritorna dict oppure None se non e' una quota-funzione utilizzabile."""
+    geo = obj.Geometry
+    if not isinstance(geo, Rhino.Geometry.LinearDimension):
+        return None
+    try:
+        txt = (geo.PlainText or "").strip()
+    except Exception, ex:
+        return None
+    if not txt:
+        return None
+    # Niente lettere di variabile -> quota normale (numero), non ci riguarda.
+    has_var = False
+    for n in VAR_NAMES:
+        if n in txt:
+            has_var = True
+            break
+    if not has_var:
+        return None
+    try:
+        e1 = geo.ExtensionLine1End
+        e2 = geo.ExtensionLine2End
+        pl = geo.Plane
+        p1 = pl.PointAt(e1.X, e1.Y)
+        p2 = pl.PointAt(e2.X, e2.Y)
+        d = pl.XAxis     # direzione di misura della quota
+    except Exception, ex:
+        return None
+    ax = "D"
+    if abs(d.Y) <= 1e-9 and abs(d.Z) <= 1e-9:
+        ax = "X"
+    elif abs(d.X) <= 1e-9 and abs(d.Z) <= 1e-9:
+        ax = "Y"
+    return {"p1": p1, "p2": p2, "axis": ax, "text": txt, "id": obj.Id}
+
+
+def _nkey(x, y):
+    return (round(x, 6), round(y, 6))
+
+
+def collect_quote_constraints(objs, tol):
+    """Dalle quote selezionate ricava:
+      var_defs   - {nome: valore} dalle quote il cui testo E' un nome variabile.
+                   Con quote discordi vince il valore PIU' FREQUENTE (voto di
+                   maggioranza), non il primo letto: una singola quota sbagliata
+                   non deve dettare il valore.
+      conflicts  - [(nome, [(valore, occorrenze), ...])] per le variabili con
+                   quote discordi, ordinati per frequenza decrescente
+      constraints- vincoli (k1, k2, axis, formula, p1, p2)
+    """
+    var_votes = {}
+    constraints = []
+    for obj in objs:
+        info = _dim_info(obj, tol)
+        if info is None:
+            continue
+        p1, p2, ax, txt = info["p1"], info["p2"], info["axis"], info["text"]
+        if ax == "X":
+            measured = abs(p2.X - p1.X)
+        elif ax == "Y":
+            measured = abs(p2.Y - p1.Y)
+        else:
+            measured = p1.DistanceTo(p2)
+        if txt in VAR_NAMES and ax != "D":
+            # quota di DEFINIZIONE: il testo e' il nome della variabile.
+            # Solo quote ORTOGONALI: un'obliqua misurerebbe la diagonale
+            # (es. 'E' sul bisellino a 45 gradi = E*1.414) e inquinerebbe
+            # il valore. Le oblique con nome-variabile restano vincoli.
+            v = round(measured, DECIMALS)
+            if txt not in var_votes:
+                var_votes[txt] = {}
+            var_votes[txt][v] = var_votes[txt].get(v, 0) + 1
+            # una definizione e' anche un vincolo: la si tiene
+        constraints.append((_nkey(p1.X, p1.Y), _nkey(p2.X, p2.Y),
+                            ax, txt, p1, p2))
+
+    var_defs = {}
+    conflicts = []
+    for name in var_votes:
+        votes = sorted(var_votes[name].items(),
+                       key=lambda t: (-t[1], -t[0]))   # frequenza, poi valore
+        var_defs[name] = votes[0][0]
+        if len(votes) > 1:
+            conflicts.append((name, votes))
+    return var_defs, conflicts, constraints
+
+
+def _chain_formula(known, f, positive):
+    """Costruisce 'known +/- f' avvolgendo f tra parentesi se ha piu' termini,
+    e ripulisce le cancellazioni di facciata."""
+    ftxt = f.strip()
+    if len(split_top_level_terms(ftxt)) > 1:
+        ftxt = "(" + ftxt + ")"
+    if known == "0":
+        expr = ("" if positive else "-") + ftxt
+    else:
+        expr = known + ("+" if positive else "-") + ftxt
+    return simplify_display(expr)
+
+
+def propagate_quotes(constraints, vars_dict, tol):
+    """Propaga le formule lungo il grafo delle quote, con VERIFICA numerica a
+    ogni passo (stessa compare_value dell'inserimento punti).
+
+    Ancore: punti gia' annotati (X_param/Y_param) e coordinate a 0.
+    Regole:
+      - quota X tra A e B: se X(A) nota -> X(B) = X(A) +/- formula, assegnata
+        SOLO se il valore ricalcolato coincide con la coordinata reale;
+      - se i due punti sono sulla stessa riga (dY~0), la Y si COPIA (e
+        simmetricamente la X sulle quote Y in colonna);
+      - ogni quota e' comunque verificata: |misura| vs |formula|; se non
+        tornano viene segnalata e NON propaga;
+      - quote oblique ('D'): solo verifica della distanza, niente propagazione.
+    Ritorna (nodes, n_verified, bad) dove nodes = {key: [x, y, ex, ey]}.
+    """
+    nodes = {}     # key -> [x, y, ex, ey]
+    X = {}
+    Y = {}
+
+    def ensure(k, x, y):
+        if k not in nodes:
+            nodes[k] = [x, y, None, None]
+
+    # --- semi: punti annotati esistenti + coordinate a zero ---
+    idx = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
+    if idx >= 0:
+        for obj in sc.doc.Objects:
+            if obj.IsDeleted or obj.Attributes.LayerIndex != idx:
+                continue
+            if not isinstance(obj.Geometry, Rhino.Geometry.Point):
+                continue
+            p = obj.Geometry.Location
+            k = _nkey(p.X, p.Y)
+            ex = obj.Attributes.GetUserString("X_param") or ""
+            ey = obj.Attributes.GetUserString("Y_param") or ""
+            if ex and ex != "--":
+                X[k] = ex
+            if ey and ey != "--":
+                Y[k] = ey
+
+    for (k1, k2, ax, f, p1, p2) in constraints:
+        ensure(k1, p1.X, p1.Y)
+        ensure(k2, p2.X, p2.Y)
+    for k in nodes:
+        if abs(nodes[k][0]) <= tol and k not in X:
+            X[k] = "0"
+        if abs(nodes[k][1]) <= tol and k not in Y:
+            Y[k] = "0"
+
+    bad = []
+    bad_keys = set()
+    n_verified = 0
+    verified_once = set()
+
+    def _propagate(coordmap, k1, k2, f, real, c1, c2):
+        """Propaga lungo un asse: se la coordinata e' nota a un estremo,
+        incatena 'nota +/- f' e assegna SOLO se il ricalcolo coincide con la
+        coordinata reale dell'altro estremo. Ritorna True se cambia."""
+        if k1 in coordmap and k2 not in coordmap:
+            expr = _chain_formula(coordmap[k1], f, real > 0)
+            val, e2 = safe_eval(expr, vars_dict)
+            if e2 is None and val is not None:
+                okp, _ = compare_value(val, c2, tol)
+                if okp == "ok":
+                    coordmap[k2] = expr
+                    return True
+        elif k2 in coordmap and k1 not in coordmap:
+            expr = _chain_formula(coordmap[k2], f, real < 0)
+            val, e2 = safe_eval(expr, vars_dict)
+            if e2 is None and val is not None:
+                okp, _ = compare_value(val, c1, tol)
+                if okp == "ok":
+                    coordmap[k1] = expr
+                    return True
+        return False
+
+    def _copy(coordmap, k1, k2):
+        """Coordinata condivisa (delta ~0): si copia attraverso la quota."""
+        if k1 in coordmap and k2 not in coordmap:
+            coordmap[k2] = coordmap[k1]
+            return True
+        if k2 in coordmap and k1 not in coordmap:
+            coordmap[k1] = coordmap[k2]
+            return True
+        return False
+
+    changed = True
+    while changed:
+        changed = False
+        for (k1, k2, ax, f, p1, p2) in constraints:
+            fv, err = safe_eval(f, vars_dict)
+            qid = (k1, k2, ax, f)
+            if err is not None or fv is None:
+                if qid not in bad_keys:
+                    bad_keys.add(qid)
+                    bad.append((ax, f, p1, p2, "formula non valutabile: %s" % err))
+                continue
+            x1, y1 = nodes[k1][0], nodes[k1][1]
+            x2, y2 = nodes[k2][0], nodes[k2][1]
+            rx = x2 - x1
+            ry = y2 - y1
+
+            do_x = False
+            do_y = False
+            if ax == "X":
+                okv, _ = compare_value(abs(fv), abs(rx), tol)
+                if okv != "ok":
+                    if qid not in bad_keys:
+                        bad_keys.add(qid)
+                        bad.append((ax, f, p1, p2,
+                                    "misura %.4f != formula %.4f" % (abs(rx), abs(fv))))
+                    continue
+                do_x = True
+            elif ax == "Y":
+                okv, _ = compare_value(abs(fv), abs(ry), tol)
+                if okv != "ok":
+                    if qid not in bad_keys:
+                        bad_keys.add(qid)
+                        bad.append((ax, f, p1, p2,
+                                    "misura %.4f != formula %.4f" % (abs(ry), abs(fv))))
+                    continue
+                do_y = True
+            else:
+                # QUOTA OBLIQUA: la formula puo' descrivere la distanza pura
+                # OPPURE una porzione parziale lungo X e/o Y (caso tipico: il
+                # bisellino a 45 gradi quotato 'E', dove dX = dY = E).
+                dist = p1.DistanceTo(p2)
+                okd, _ = compare_value(abs(fv), dist, tol)
+                okx, _ = compare_value(abs(fv), abs(rx), tol)
+                oky, _ = compare_value(abs(fv), abs(ry), tol)
+                if okx == "ok":
+                    do_x = True
+                if oky == "ok":
+                    do_y = True
+                if not do_x and not do_y:
+                    if okd == "ok":
+                        # distanza pura: SOLO verifica, niente propagazione
+                        if qid not in verified_once:
+                            verified_once.add(qid)
+                            n_verified += 1
+                        continue
+                    if qid not in bad_keys:
+                        bad_keys.add(qid)
+                        bad.append((ax, f, p1, p2,
+                                    "dist %.4f, dX %.4f, dY %.4f != formula %.4f"
+                                    % (dist, abs(rx), abs(ry), abs(fv))))
+                    continue
+
+            if qid not in verified_once:
+                verified_once.add(qid)
+                n_verified += 1
+
+            if do_x:
+                changed = _propagate(X, k1, k2, f, rx, x1, x2) or changed
+                if abs(ry) <= tol:             # stessa riga: la Y si copia
+                    changed = _copy(Y, k1, k2) or changed
+            if do_y:
+                changed = _propagate(Y, k1, k2, f, ry, y1, y2) or changed
+                if abs(rx) <= tol:             # stessa colonna: la X si copia
+                    changed = _copy(X, k1, k2) or changed
+
+    for k in nodes:
+        nodes[k][2] = X.get(k)
+        nodes[k][3] = Y.get(k)
+    return nodes, n_verified, bad
+
+
+def apply_quote_points(nodes, vars_dict, tol, idx_pts, idx_dots):
+    """Crea i punti annotati derivati dalle quote. SOLO i punti COMPLETI
+    (X_param e Y_param entrambe note): un punto mezzo vuoto non e' conosciuto
+    parametricamente e non va inserito. Non tocca i punti gia' esistenti
+    (che fanno da ancore). Ritorna (creati, gia_presenti, incompleti)."""
+    existing = set()
+    if idx_pts >= 0:
+        for obj in sc.doc.Objects:
+            if obj.IsDeleted or obj.Attributes.LayerIndex != idx_pts:
+                continue
+            if not isinstance(obj.Geometry, Rhino.Geometry.Point):
+                continue
+            p = obj.Geometry.Location
+            existing.add(_nkey(p.X, p.Y))
+
+    created = 0
+    skipped = 0
+    incomplete = 0
+    for k in sorted(nodes.keys()):
+        x, y, ex, ey = nodes[k]
+        if ex is None and ey is None:
+            continue                  # nodo mai raggiunto: non conta
+        if k in existing:
+            skipped += 1
+            continue
+        if not ex or not ey:
+            incomplete += 1           # raggiunto a meta': NON si crea
+            continue
+        pt = Point3d(x, y, 0.0)
+        point_key = make_point_key(x, y)
+        dot_key = make_dot_key(x, y)
+        prov = create_provisional_point(pt, point_key, idx_pts)
+        finalize_point(prov, point_key, x, y, ex, ey, "ok", "ok", "da quota")
+        dot_text = build_dot_text(x, y, ex, ey, "da quota", "ok", "ok")
+        pt_dot = Point3d(x + DOT_OFFSET_X, y + DOT_OFFSET_Y, 0.0)
+        td = TextDot(dot_text, pt_dot)
+        td.FontHeight = DOT_HEIGHT
+        td.FontFace = DOT_FONT
+        attr_dot = Rhino.DocObjects.ObjectAttributes()
+        attr_dot.LayerIndex = idx_dots
+        attr_dot.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
+        attr_dot.ObjectColor = COLOR_DOT_COMPLETE
+        attr_dot.Name = dot_key
+        sc.doc.Objects.AddTextDot(td, attr_dot)
+        created += 1
+    return created, skipped, incomplete
+
+
+def certain_formulas_for(pt, quote_nodes, tol):
+    """Formule CERTE (100%) per PRECOMPILARE il dialog al clic di un punto.
+    Ritorna (ex, ey), ciascuna None se non c'e' certezza per quell'asse.
+
+    Fonti, in ordine di forza:
+      1. coordinata a zero -> "0";
+      2. nodo del grafo QUOTE coincidente col punto cliccato: la formula e'
+         dichiarata dalle quote e gia' verificata in propagazione (e' qui che
+         i nodi 'raggiunti a meta'' tornano utili: non creati come punti, ma
+         pronti a precompilare il loro asse al clic);
+      3. copia da un punto annotato ESATTAMENTE allineato e con stato 'ok'
+         (stessa colonna -> X, stessa riga -> Y): coordinata identica,
+         formula identica. Si prende il piu' vicino.
+    Tutto cio' che non e' certo resta ai suggerimenti: qui niente euristica.
+    """
+    ex = None
+    ey = None
+    if abs(pt.X) <= tol:
+        ex = "0"
+    if abs(pt.Y) <= tol:
+        ey = "0"
+
+    # 2) nodo quote coincidente
+    if quote_nodes and (ex is None or ey is None):
+        for k in quote_nodes:
+            nx, ny, nex, ney = quote_nodes[k]
+            if abs(nx - pt.X) <= tol and abs(ny - pt.Y) <= tol:
+                if ex is None and nex:
+                    ex = nex
+                if ey is None and ney:
+                    ey = ney
+                break
+
+    if ex is not None and ey is not None:
+        return ex, ey
+
+    # 3) copia da punti annotati allineati (solo stato 'ok')
+    idx = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
+    if idx >= 0:
+        best_dx = None   # distanza lungo Y del miglior allineato in colonna
+        best_dy = None   # distanza lungo X del miglior allineato in riga
+        cand_ex = None
+        cand_ey = None
+        for obj in sc.doc.Objects:
+            if obj.IsDeleted or obj.Attributes.LayerIndex != idx:
+                continue
+            if not isinstance(obj.Geometry, Rhino.Geometry.Point):
+                continue
+            p = obj.Geometry.Location
+            dx = abs(p.X - pt.X)
+            dy = abs(p.Y - pt.Y)
+            if dx <= tol and dy <= tol:
+                continue   # punto coincidente: e' il caso sovrascrittura
+            if ex is None and dx <= tol:
+                e = obj.Attributes.GetUserString("X_param") or ""
+                s = obj.Attributes.GetUserString("X_status") or ""
+                if e and e != "--" and s == "ok":
+                    if best_dx is None or dy < best_dx:
+                        best_dx = dy
+                        cand_ex = e
+            if ey is None and dy <= tol:
+                e = obj.Attributes.GetUserString("Y_param") or ""
+                s = obj.Attributes.GetUserString("Y_status") or ""
+                if e and e != "--" and s == "ok":
+                    if best_dy is None or dx < best_dy:
+                        best_dy = dx
+                        cand_ey = e
+        if ex is None and cand_ex:
+            ex = cand_ex
+        if ey is None and cand_ey:
+            ey = cand_ey
+
+    return ex, ey
+
+
+def show_quote_report(var_defs, conflicts, n_constraints, n_verified, bad,
+                      created, skipped, incomplete):
+    lines = ["QUOTE-FUNZIONE - rapporto", ""]
+    if var_defs:
+        defs = ", ".join("%s=%g" % (n, var_defs[n]) for n in sorted(var_defs))
+        lines.append("Variabili definite dalle quote: " + defs)
+    if conflicts:
+        lines.append("QUOTE DI DEFINIZIONE DISCORDI (usato il valore piu' frequente):")
+        for (n, votes) in conflicts:
+            vt = ", ".join("%g (x%d)" % (v, c) for (v, c) in votes)
+            lines.append("  %s: %s" % (n, vt))
+    lines.append("Vincoli letti: %d  -  verificati: %d" % (n_constraints, n_verified))
+    lines.append("Punti creati (completi): %d  -  gia' presenti: %d" % (created, skipped))
+    if incomplete:
+        lines.append("Punti raggiunti solo a meta' (NON creati): %d" % incomplete)
+        lines.append("  (manca una quota o un'ancora sull'altro asse)")
+    if bad:
+        lines.append("")
+        lines.append("QUOTE NON CONFORMI (segnalate, non propagate):")
+        for (ax, f, p1, p2, why) in bad:
+            lines.append("  [%s] '%s'  (%.1f,%.1f)->(%.1f,%.1f): %s" % (
+                ax, f, p1.X, p1.Y, p2.X, p2.Y, why))
+    msg = "\n".join(lines)
+    if bad or conflicts:
+        icon = WinForms.MessageBoxIcon.Warning
+    else:
+        icon = WinForms.MessageBoxIcon.Information
+    WinForms.MessageBox.Show(msg, "PKG Annotator - quote", 
+                             WinForms.MessageBoxButtons.OK, icon)
+
+
+def show_help_dialog():
+    """Avvio SENZA selezione: mostra l'help. Ritorna True per continuare con
+    la sessione classica punto-per-punto, False per uscire."""
+    msg = (
+        "PKG ANNOTATOR v4.3 - guida rapida\n\n"
+        "AVVIO CON SELEZIONE (consigliato):\n"
+        "  Seleziona le QUOTE-funzione (e le geometrie) PRIMA di avviare.\n"
+        "  - Quota con testo = nome variabile (L, P, A, S, C, T, E):\n"
+        "      DEFINISCE il valore della variabile (precompila il dialog).\n"
+        "  - Quota con testo = formula (es. (P/2), L+S):\n"
+        "      DICHIARA la relazione tra i due punti quotati. Lo script la\n"
+        "      VERIFICA sulle coordinate reali e, partendo dalle ancore\n"
+        "      (punti gia' annotati e coordinate a 0), PROPAGA le formule\n"
+        "      creando i punti annotati. Le quote che non tornano vengono\n"
+        "      segnalate e non propagano.\n"
+        "  Quote orizzontali -> vincolano la X; verticali -> la Y.\n"
+        "  Quote OBLIQUE: se la formula corrisponde alla distanza -> solo\n"
+        "  verifica; se corrisponde a dX e/o dY (es. 'E' sul bisellino a 45\n"
+        "  gradi, dove dX = dY = E) -> propaga su quegli assi.\n\n"
+        "AVVIO SENZA SELEZIONE: questa guida, poi (se Continua) la sessione\n"
+        "classica: clic su un punto, suggerimento di X_param/Y_param dai\n"
+        "vicini annotati, conferma, TextDot quotato. Opzioni nel prompt:\n"
+        "SpecchiaCurve (mirror su linee cyan taggate), Invio per terminare.\n\n"
+        "Continuare con la sessione punto-per-punto?")
+    r = WinForms.MessageBox.Show(msg, "PKG Annotator - help",
+                                 WinForms.MessageBoxButtons.YesNo,
+                                 WinForms.MessageBoxIcon.Information)
+    return r == WinForms.DialogResult.Yes
+
+
 # -----------------------------------------------------------------------------
 def show_summary_dialog(records):
     if not records:
@@ -1723,7 +2192,43 @@ def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
 
 # -----------------------------------------------------------------------------
 def main():
-    vars_dict, save_to_doc = show_params_dialog()
+    # === AVVIO (v4.3) ===
+    # CON selezione: si leggono le QUOTE-funzione selezionate (definizione
+    # variabili + vincoli), si precompila il dialog, si verificano e propagano
+    # le formule creando i punti. SENZA selezione: help, poi sessione classica.
+    pre_sel = []
+    try:
+        pre_sel = list(sc.doc.Objects.GetSelectedObjects(False, False))
+    except Exception, ex:
+        pre_sel = []
+
+    quote_defs = {}
+    quote_conflicts = []
+    quote_constraints = []
+    if pre_sel:
+        quote_defs, quote_conflicts, quote_constraints = \
+            collect_quote_constraints(pre_sel, sc.doc.ModelAbsoluteTolerance or 0.001)
+    else:
+        if not show_help_dialog():
+            print "PKG Annotator: chiuso dall'help."
+            return
+
+    # AVVISO PRIMA del dialog: quote di definizione discordi. L'utente deve
+    # poterle correggere nel campo (evidenziato in rosso), non scoprirlo a
+    # propagazione gia' avvenuta.
+    conflict_names = set()
+    if quote_conflicts:
+        wl = ["Quote di definizione DISCORDI - controlla i campi in rosso:", ""]
+        for (n, votes) in quote_conflicts:
+            conflict_names.add(n)
+            vt = ", ".join("%g (x%d)" % (v, c) for (v, c) in votes)
+            wl.append("  %s: %s  -> proposto %g" % (n, vt, quote_defs[n]))
+        WinForms.MessageBox.Show("\n".join(wl), "PKG Annotator - quote discordi",
+                                 WinForms.MessageBoxButtons.OK,
+                                 WinForms.MessageBoxIcon.Warning)
+
+    vars_dict, save_to_doc = show_params_dialog(preset=quote_defs,
+                                                conflict_names=conflict_names)
     if vars_dict is None:
         print "PKG Annotator: annullato."
         return
@@ -1737,6 +2242,27 @@ def main():
 
     idx_pts  = get_or_create_layer(LAYER_POINTS, COLOR_POINTS)
     idx_dots = get_or_create_layer(LAYER_DOTS,   COLOR_DOTS)
+
+    # === FASE QUOTE (v4.3): verifica + propagazione + creazione punti ===
+    quote_nodes = {}
+    if quote_constraints:
+        nodes, n_ver, bad = propagate_quotes(quote_constraints, vars_dict, tol)
+        quote_nodes = nodes          # restano in memoria per la precompilazione
+        created, skipped, incomplete = apply_quote_points(
+            nodes, vars_dict, tol, idx_pts, idx_dots)
+        sc.doc.Views.Redraw()
+        show_quote_report(quote_defs, quote_conflicts,
+                          len(quote_constraints), n_ver, bad,
+                          created, skipped, incomplete)
+
+    # La selezione d'avvio intralcerebbe il clic dei punti: via tutto prima
+    # della sessione punto-per-punto.
+    if pre_sel:
+        try:
+            sc.doc.Objects.UnselectAll()
+            sc.doc.Views.Redraw()
+        except Exception, ex:
+            pass
 
     fmt   = "%." + str(DECIMALS) + "f"
     count = 0
@@ -1786,12 +2312,26 @@ def main():
         source_ex = sources_x[0] if sources_x else None
         source_ey = sources_y[0] if sources_y else None
 
+        # === PRECOMPILAZIONE CERTA (v4.3) ===
+        # Se il punto non e' una sovrascrittura (o lo e' solo in parte), i
+        # campi si precompilano SOLO con formule certe al 100%: zero, nodi del
+        # grafo quote, copia da punti esattamente allineati. Il feedback live
+        # del dialog le mostra subito verdi; basta confermare.
+        pre_ex = preset["X_param"]
+        pre_ey = preset["Y_param"]
+        if not pre_ex or not pre_ey:
+            cert_ex, cert_ey = certain_formulas_for(pt, quote_nodes, tol)
+            if not pre_ex and cert_ex:
+                pre_ex = cert_ex
+            if not pre_ey and cert_ey:
+                pre_ey = cert_ey
+
         expr_x, expr_y, note, sx, sy = show_param_dialog(
             x, y, vars_dict, tol,
             source_ex=source_ex, source_ey=source_ey,
             sources_x=sources_x, sources_y=sources_y,
-            preset_ex=preset["X_param"],
-            preset_ey=preset["Y_param"],
+            preset_ex=pre_ex,
+            preset_ey=pre_ey,
             preset_note=preset["Nota"])
 
         # === Gestione esito del dialogo ===
