@@ -2,38 +2,67 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PACKAGING POINT ANNOTATOR  v4.1  -  Rhino 7 / 8  (IronPython 2.7)
+#  PACKAGING POINT ANNOTATOR  v4.3  -  Rhino 7 / 8  (IronPython 2.7)
+#
+#  Novita' v4.3 (motore di suggerimento):
+#    - fase COSTRUTTIVA: vicino reale + scarto geometrico (somma di pannelli)
+#    - sorgenti ordinate PER ASSE (X: vicini allineati in orizzontale,
+#      Y: vicini allineati in verticale)
+#    - variabili a valore nullo (es. T=0) escluse da tutti i suggerimenti
+#    - multipli (X*2, X*3) limitati agli spessori S, E
+#    - chiave canonica RAZIONALE (espande (P-S), fonde P/2+P/2 -> P)
+#    - display fedele alla sequenza dei pannelli (mai aggregato in 2*L)
 #
 #  Variabili packaging:
 #    L = Larghezza         P = Profondita      A = Altezza
 #    S = Spessore cartone  C = Patella d'incollatura (colla)
 #    T = Patella di chiusura (Tuck)             E = Bisello (misura configurabile)
 #
-#  Novita' v4.1 rispetto a v4.0:
-#    - CONTRATTO CON L'EXPORTER: ogni punto parametrico ora scrive nello
-#      UserString anche la chiave "pair_id" (valore = point_key geometrico,
-#      es. PKG_X+0100_Y+0000). Esporta_Geometrie_Parametrico legge questa
-#      chiave per popolare P1_id / P2_id / Centro_id nelle curve propagate.
-#      In v4.0 la chiave non veniva mai scritta, quindi quei campi uscivano
-#      sempre vuoti nel TXT di export.
-#    - finalize_point() e create_provisional_point() scrivono pair_id.
+#  Novita' v4.2 rispetto a v4.0:
+#    [1] PRECISIONE / CONFRONTO ROBUSTO PER FORMULE LUNGHE
+#        La lunghezza della formula NON pregiudica il confronto: il parser usa
+#        compile()/eval() (nessun limite pratico di lunghezza) e il confronto e'
+#        in float64 sul valore reale grezzo del punto (pt.X/pt.Y), non su valori
+#        arrotondati. L'errore di rappresentazione accumulato su una somma di
+#        molti termini resta dell'ordine di 1e-11 mm, ben sotto ogni tolleranza
+#        geometrica. Per blindare il caso di tolleranza documento molto stretta
+#        su coordinate di grande modulo, la soglia "ok" ora e':
+#            ok_tol = tol + 1e-9 * |valore_reale|
+#        Componente relativa minima (sub-micron) che NON allenta la precisione
+#        geometrica ma rende il confronto indipendente dalla lunghezza/scala.
 #
-#  Novita' v4 rispetto a v3.0:
-#    - VISIBILITA' AL CLIC: il Point viene creato e disegnato SUBITO dopo il
-#      clic, prima di aprire il dialogo di annotazione.
-#    - ROLLBACK PULITO: se l'utente preme "Salta" o "Annulla tutto", il punto
-#      provvisorio appena creato viene cancellato.
-#    - SUGGERIMENTO COORDINATA ZERO: se la coordinata target e' 0 (entro
-#      tolleranza), il reverse lookup ritorna direttamente la costante "0".
-#    - TERMINI COMPOSTI DI COMPENSAZIONE: il generatore di candidati aggiunge
-#      binomi come (L-S), (P-S), (A-S) (lista COMPOUND_TERMS).
+#    [2] ANCORA "PIU' LONTANO DA 0" -> RIFERIMENTI IN SOTTRAZIONE
+#        Speculare al caso target==0 (che ritorna "0"), il reverse lookup ora
+#        individua, tra le SOLE formule realmente presenti nel documento, quella
+#        il cui valore assoluto e' massimo lungo l'asse (il punto piu' lontano
+#        da 0). La usa come ANCORA e genera candidati per sottrazione
+#        (ancora - V, ancora - (L-S), ...) con priorita' massima. Cosi' i punti
+#        intermedi vengono espressi come "totale - scarto" SENZA inventare nulla:
+#        l'ancora e' una formula esistente, non una combinazione fabbricata.
+#        Il fallback combinatorio (che invece "inventa") resta solo come ultima
+#        risorsa, con priorita' piu' bassa.
 #
-#  Eredita da v3:
-#    - Schema di naming geometrico: PKG_X+0112_Y-0030 (chiave posizionale)
-#    - Nota utente solo in UserString "Nota", il nome resta una chiave pulita
-#    - TextDot con altezza 10 e colore secondo completezza (grigio/giallo)
-#    - Sovrascrittura automatica per chiave geometrica
-#    - Reverse lookup "vicino geometrico" con pool di sorgenti
+#    [3] SPECCHIA CURVE TAGGATE (mirror lungo una linea)
+#        Nuova opzione "SpecchiaCurve" nel prompt di acquisizione punti.
+#        Specchia gruppi di linee/curve lungo una linea di proiezione:
+#          - le CURVE da specchiare portano una UserString con valore
+#            "Proietta su A" (oppure B, C...);
+#          - la LINEA di proiezione e' colorata CIANO e porta una UserString
+#            con valore "A" (oppure B, C...).
+#        Ogni curva "Proietta su X" viene specchiata sulla linea cyan "X".
+#        Il riflesso e' creato sul lato opposto della linea (piano di mirror
+#        contenente la linea e l'asse Z del mondo). La nota "Proietta su X" sul
+#        duplicato viene sostituita con "Specchiato da X" per non rispecchiarlo
+#        di nuovo. Semplifica molto l'inserimento del mezzo simmetrico.
+#
+#  Eredita da v4.0:
+#    - VISIBILITA' AL CLIC: il Point e' creato e disegnato SUBITO dopo il clic.
+#    - ROLLBACK PULITO su "Salta"/"Annulla tutto".
+#    - SUGGERIMENTO COORDINATA ZERO: target 0 -> ritorna la sola costante "0".
+#    - TERMINI COMPOSTI DI COMPENSAZIONE: (L-S), (P-S), (A-S) nei candidati.
+#    - Naming geometrico PKG_X+0112_Y-0030, nota in UserString "Nota".
+#    - TextDot colore per completezza, sovrascrittura per chiave geometrica.
+#    - Reverse lookup "vicino geometrico" con pool di sorgenti.
 # =============================================================================
 
 import Rhino
@@ -56,14 +85,25 @@ COLOR_DOTS   = System.Drawing.Color.FromArgb(105, 105, 105)
 DOT_OFFSET_X = 5.0
 DOT_OFFSET_Y = 3.0
 
-# Colori TextDot per stato di completezza (Punto 2)
+# Soglia relativa minima aggiunta alla tolleranza assoluta nel confronto "ok"
+# (Punto 1 v4.2). Sub-micron in pratica: blinda il confronto su coordinate di
+# grande modulo senza allentare la precisione geometrica.
+REL_EPS = 1e-9
+
+# Colori TextDot per stato di completezza
 COLOR_DOT_COMPLETE   = Drawing.Color.FromArgb(105, 105, 105)   # grigio: X e Y entrambi compilati e validi
 COLOR_DOT_INCOMPLETE = Drawing.Color.FromArgb(220, 180, 0)     # giallo: mancanze (Nota esclusa dal calcolo)
 
 VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
 
-# Termini COMPOSTI aggiungibili nel reverse lookup (v4).
+# Termini COMPOSTI aggiungibili nel reverse lookup.
 COMPOUND_TERMS = ["(L-S)", "(P-S)", "(A-S)"]
+
+# Variabili di SPESSORE: per queste i multipli (S*2, S*3, E*2) hanno senso
+# fisico (compensazioni di spessore del materiale). Per le altre (L, P, A, C)
+# un multiplo come L*2 o P*3 non corrisponde a nulla nel blank e indurrebbe
+# in errore: i pannelli ripetuti si scrivono come somma (C+P-S+L+P+L).
+THICKNESS_VARS = ["S", "E"]
 VAR_LABELS = {
     "L": "Larghezza",
     "P": "Profondita",
@@ -93,15 +133,16 @@ COLOR_APPROX  = Drawing.Color.FromArgb(190, 130, 0)
 COLOR_ERR     = Drawing.Color.FromArgb(190, 30,  30)
 COLOR_NEUTRAL = Drawing.Color.FromArgb(110, 110, 110)
 
+# Regex per il riconoscimento delle note di proiezione (Punto 3 v4.2)
+_PROIETTA_RE = re.compile(r"^\s*proietta\s+su\s+(.+?)\s*$", re.IGNORECASE)
+
 
 # -----------------------------------------------------------------------------
-#  NAMING GEOMETRICO (Punto 4 + scelte v3)
+#  NAMING GEOMETRICO
 # -----------------------------------------------------------------------------
 def make_point_key(x, y):
     """Costruisce la chiave geometrica del punto, arrotondando al millimetro.
-    Formato: PKG_X+0112_Y-0030  (segno esplicito, padding a 4 cifre).
-    Copre +/- 9999 mm, sufficiente per ogni tracciato cartotecnico.
-    """
+    Formato: PKG_X+0112_Y-0030  (segno esplicito, padding a 4 cifre)."""
     ix = int(round(x))
     iy = int(round(y))
     sx = "+" if ix >= 0 else "-"
@@ -110,8 +151,7 @@ def make_point_key(x, y):
 
 
 def make_dot_key(x, y):
-    """Chiave per il TextDot associato a un punto. Stesso schema, prefisso diverso
-    in modo che la sovrascrittura possa cancellarlo per match esatto."""
+    """Chiave per il TextDot associato a un punto."""
     ix = int(round(x))
     iy = int(round(y))
     sx = "+" if ix >= 0 else "-"
@@ -164,8 +204,17 @@ def safe_eval(expr, vars_dict):
 
 
 def compare_value(computed, real, tol):
+    """Confronto valore calcolato vs reale (Punto 1 v4.2).
+
+    Soglia "ok": tolleranza assoluta del documento PIU' una componente
+    relativa minima (REL_EPS * |real|) che assorbe l'errore di rappresentazione
+    float su coordinate di grande modulo. NON allenta la precisione geometrica
+    (resta ben sotto il micron) ma rende il confronto robusto a prescindere
+    dalla LUNGHEZZA della formula o dalla scala del modello.
+    """
     delta = abs(computed - real)
-    if delta <= tol:
+    ok_tol = tol + REL_EPS * abs(real)
+    if delta <= ok_tol:
         return "ok", delta
     elif delta <= tol * 10.0:
         return "approx", delta
@@ -317,17 +366,17 @@ def show_params_dialog():
 
 
 # -----------------------------------------------------------------------------
-#  REVERSE LOOKUP (Punto 3) - basato sul vicino geometrico
+#  REVERSE LOOKUP - basato sul vicino geometrico
 # -----------------------------------------------------------------------------
 def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False, tol=1e-6):
-    """Raccoglie un POOL di formule sorgenti per il reverse lookup."""
+    """Raccoglie un POOL di formule sorgenti per il reverse lookup.
+    Ritorna (sources_x, sources_y) ordinate per priorita', senza duplicati
+    e senza stringhe vuote."""
     idx = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
     if idx < 0:
         return [], []
 
     entries = []
-    all_ex = []
-    all_ey = []
 
     for obj in sc.doc.Objects:
         if obj.IsDeleted:
@@ -346,33 +395,29 @@ def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False
         ey = obj.Attributes.GetUserString("Y_param") or ""
         if ex == "--": ex = ""
         if ey == "--": ey = ""
-        entries.append((d, ex, ey))
-        if ex: all_ex.append(ex)
-        if ey: all_ey.append(ey)
+        entries.append((abs(dx), abs(dy), ex, ey))
 
     if not entries:
         return [], []
 
-    entries.sort(key=lambda t: t[0])
+    # Ordinamento PER ASSE (v4.3). Per la formula X il vicino piu' informativo
+    # e' quello allineato in ORIZZONTALE (|dy| minimo: il gap in X e' la
+    # larghezza di un pannello); per la Y quello allineato in VERTICALE
+    # (|dx| minimo: il gap in Y e' l'altezza di un pannello). E' il motivo per
+    # cui con l'ordinamento euclideo unico la X usciva bene e la Y spesso no.
+    entries_x = sorted(entries, key=lambda t: (t[1], t[0]))
+    entries_y = sorted(entries, key=lambda t: (t[0], t[1]))
 
     sources_x = []
     sources_y = []
     seen_x = set()
     seen_y = set()
 
-    for d, ex, ey in entries[:k_neighbors]:
+    for adx, ady, ex, ey in entries_x:
         if ex and ex not in seen_x:
             sources_x.append(ex)
             seen_x.add(ex)
-        if ey and ey not in seen_y:
-            sources_y.append(ey)
-            seen_y.add(ey)
-
-    for ex in all_ex:
-        if ex and ex not in seen_x:
-            sources_x.append(ex)
-            seen_x.add(ex)
-    for ey in all_ey:
+    for adx, ady, ex, ey in entries_y:
         if ey and ey not in seen_y:
             sources_y.append(ey)
             seen_y.add(ey)
@@ -391,7 +436,8 @@ def find_nearest_annotated_point(target_pt, exclude_at_zero_dist=False, tol=1e-6
 
 
 def split_top_level_terms(expr):
-    """Spezza un'espressione nei suoi termini di somma di primo livello."""
+    """Spezza un'espressione nei suoi termini di somma di primo livello,
+    rispettando le parentesi. Ogni termine porta con se' il proprio segno."""
     expr = expr.strip()
     if not expr:
         return []
@@ -436,106 +482,146 @@ def join_terms(terms):
     return out
 
 
-def _compensation_pairs():
-    """Coppie di compensazione derivate da COMPOUND_TERMS.
-    Per ogni '(V-S)' ritorna (V, S, '(V-S)'), es. ('P','S','(P-S)').
-    Cosi' estendendo COMPOUND_TERMS (es. aggiungendo '(E-S)') la
-    normalizzazione segue automaticamente, senza altre modifiche."""
-    pairs = []
-    for comp in COMPOUND_TERMS:
-        m = re.match(r"^\(([A-Za-z])\-([A-Za-z])\)$", comp)
-        if m:
-            pairs.append((m.group(1), m.group(2), comp))
-    return pairs
+_MONO_RE = re.compile(r"^([A-Z])$|^([A-Z])/(\d+)$|^([A-Z])\*(\d+)$|^(\d+)\*([A-Z])$")
 
 
-def normalize_compensation(expr):
-    """Ricompatta i binomi di compensazione di primo livello in forma
-    parentesizzata: una coppia di termini consecutivi '+V' seguiti da '-S'
-    (con '(V-S)' in COMPOUND_TERMS) viene unita in '+(V-S)'.
-
-    Scopo cartotecnico: la forma '(P-S)' rende esplicito SU QUALE LATO si
-    scarica lo spessore S del cartone; '+P-S' sparso tra altri termini
-    perde quella leggibilita'. Il reverse lookup puo' generare entrambe le
-    scritture a seconda del vicino geometrico usato come sorgente; questa
-    funzione garantisce che il suggerimento esca sempre nella forma con
-    parentesi.
-
-    Non tocca termini gia' parentesizzati, ne' monomi con moltiplicatori o
-    divisioni (es. 'S*2', 'P/3', 'L-S*2'): quelli restano invariati.
-    Il valore numerico non cambia mai."""
-    terms = split_top_level_terms(expr)
-    if len(terms) < 2:
-        return expr
-    pairs = _compensation_pairs()
-    out = []
-    i = 0
-    while i < len(terms):
-        t = terms[i]
-        merged = False
-        if i + 1 < len(terms):
-            nxt = terms[i + 1]
-            for v, s, comp in pairs:
-                if t == "+" + v and nxt == "-" + s:
-                    out.append("+" + comp)
-                    i += 2
-                    merged = True
-                    break
-        if not merged:
-            out.append(t)
-            i += 1
-    return join_terms(out)
+def _gcd(a, b):
+    while b:
+        a, b = b, a % b
+    return a
 
 
-def canonical_form(expr):
-    """Forma canonica di un'espressione: somma di monomi atomici di primo
-    livello con coefficienti aggregati."""
-    terms = split_top_level_terms(expr)
-    coeffs = {}
-    for t in terms:
+def _expand_signed_terms(expr, outer_sign, out):
+    """Espande ricorsivamente i termini additivi di primo livello aprendo le
+    parentesi che avvolgono una somma: '-(P-S)' -> -P, +S. Le parentesi
+    ridondanti attorno a un singolo monomio ('(P/2)') vengono rimosse."""
+    for t in split_top_level_terms(expr):
         if not t:
             continue
         if t[0] == "-":
-            sign = -1
-            mono = t[1:].strip()
+            s = -outer_sign
+            body = t[1:].strip()
         elif t[0] == "+":
-            sign = 1
-            mono = t[1:].strip()
+            s = outer_sign
+            body = t[1:].strip()
         else:
-            sign = 1
-            mono = t.strip()
-        if not mono:
+            s = outer_sign
+            body = t.strip()
+        if not body:
             continue
+        if body.startswith("(") and body.endswith(")"):
+            depth = 0
+            wraps = True
+            for i in range(len(body)):
+                ch = body[i]
+                if ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                    if depth == 0 and i < len(body) - 1:
+                        wraps = False
+                        break
+            if wraps:
+                inner = body[1:-1].strip()
+                if len(split_top_level_terms(inner)) > 1:
+                    _expand_signed_terms(inner, s, out)
+                    continue
+                body = inner
+        out.append((s, body))
+
+
+def canonical_form(expr):
+    """CHIAVE canonica per confronto e deduplicazione (NON per il display).
+    Espande le parentesi additive e aggrega i monomi X, X/n, X*n, n*X con
+    coefficienti RAZIONALI. Cosi' 'C+(P-S)+L' e 'C+P-S+L' hanno la stessa
+    chiave, e '(P/2)+A+P/2' coincide con 'A+P'. I monomi non riconosciuti
+    restano atomi opachi. Ritorna '0' se tutto si annulla."""
+    pairs = []
+    try:
+        _expand_signed_terms(expr, 1, pairs)
+    except Exception, ex:
+        return expr.strip()
+    coeffs = {}
+    for s, body in pairs:
+        is_num = False
+        fv = 0.0
         try:
-            if float(mono) == 0.0:
-                continue
+            fv = float(body)
+            is_num = True
         except ValueError:
             pass
-        coeffs[mono] = coeffs.get(mono, 0) + sign
-
-    nonzero = {}
-    for k, v in coeffs.items():
-        if v != 0:
-            nonzero[k] = v
-
-    if not nonzero:
-        return "0"
-
-    keys_sorted = sorted(nonzero.keys())
-    parts = []
-    for k in keys_sorted:
-        c = nonzero[k]
-        if c == 1:
-            parts.append("+" + k)
-        elif c == -1:
-            parts.append("-" + k)
+        if is_num:
+            if fv == 0.0:
+                continue
+            key = "#" + body
+            num, den = s, 1
         else:
-            sign_str = "+" if c > 0 else ""
-            parts.append("%s%d*%s" % (sign_str, c, k))
-    canon = "".join(parts)
-    if canon.startswith("+"):
-        canon = canon[1:]
-    return canon
+            m = _MONO_RE.match(body.replace(" ", ""))
+            if m:
+                if m.group(1):
+                    key, num, den = m.group(1), s, 1
+                elif m.group(2):
+                    key, num, den = m.group(2), s, int(m.group(3))
+                elif m.group(4):
+                    key, num, den = m.group(4), s * int(m.group(5)), 1
+                else:
+                    key, num, den = m.group(7), s * int(m.group(6)), 1
+            else:
+                key, num, den = body, s, 1
+        on, od = coeffs.get(key, (0, 1))
+        n2 = on * den + num * od
+        d2 = od * den
+        if n2 == 0:
+            coeffs[key] = (0, 1)
+        else:
+            g = _gcd(abs(n2), d2)
+            coeffs[key] = (n2 // g, d2 // g)
+
+    parts = []
+    for key in sorted(coeffs.keys()):
+        num, den = coeffs[key]
+        if num == 0:
+            continue
+        parts.append("%s:%d/%d" % (key, num, den))
+    if not parts:
+        return "0"
+    return "|".join(parts)
+
+
+def simplify_display(expr):
+    """Semplificazione SOLO di facciata: elimina le coppie di termini opposti
+    di primo livello (es. '...-S+S') PRESERVANDO l'ordine dei pannelli.
+    Non aggrega mai i coefficienti: 'C+P-S+L+P+L' resta scritto cosi',
+    non diventa 'C+2*P+2*L-S'."""
+    terms = split_top_level_terms(expr)
+    norm = []
+    for t in terms:
+        if not t:
+            continue
+        if t[0] in "+-":
+            norm.append(t)
+        else:
+            norm.append("+" + t)
+    removed = [False] * len(norm)
+    for i in range(len(norm)):
+        if removed[i]:
+            continue
+        if norm[i][0] == "+":
+            opp = "-" + norm[i][1:]
+        else:
+            opp = "+" + norm[i][1:]
+        for j in range(i + 1, len(norm)):
+            if not removed[j] and norm[j] == opp:
+                removed[i] = True
+                removed[j] = True
+                break
+    kept = []
+    for i in range(len(norm)):
+        if not removed[i]:
+            kept.append(norm[i])
+    if not kept:
+        return "0"
+    return join_terms(kept)
 
 
 def neighbor_candidates_from(expr_source):
@@ -550,14 +636,17 @@ def neighbor_candidates_from(expr_source):
 
     existing = set(terms)
 
+    # 1) Riduzione di testa e coda
     if len(terms) > 1:
         candidates.append(join_terms(terms[:-1]))
         candidates.append(join_terms(terms[1:]))
 
+    # 1bis) Riduzione interna
     if len(terms) > 2:
         for i in range(1, len(terms) - 1):
             candidates.append(join_terms(terms[:i] + terms[i+1:]))
 
+    # 2) Aggiunta in coda, con filtro strutturale
     for v in VAR_NAMES:
         plus  = "+" + v
         minus = "-" + v
@@ -566,6 +655,7 @@ def neighbor_candidates_from(expr_source):
         if plus not in existing:
             candidates.append(join_terms(terms + [minus]))
 
+    # 2bis) Aggiunta in coda dei termini COMPOSTI di compensazione
     for c in COMPOUND_TERMS:
         plus  = "+" + c
         minus = "-" + c
@@ -574,6 +664,7 @@ def neighbor_candidates_from(expr_source):
         if minus not in existing:
             candidates.append(join_terms(terms + [minus]))
 
+    # 3) Aggiunta in testa, stesso filtro
     for v in VAR_NAMES:
         plus  = "+" + v
         minus = "-" + v
@@ -582,6 +673,7 @@ def neighbor_candidates_from(expr_source):
         if plus not in existing:
             candidates.append(join_terms([minus] + terms))
 
+    # 3bis) Aggiunta in testa dei termini COMPOSTI
     for c in COMPOUND_TERMS:
         plus  = "+" + c
         minus = "-" + c
@@ -590,19 +682,119 @@ def neighbor_candidates_from(expr_source):
         if minus not in existing:
             candidates.append(join_terms([minus] + terms))
 
+    # 4) La sorgente stessa
     candidates.append(join_terms(terms))
 
     return candidates
 
 
-def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
-    """Reverse lookup parametrico."""
-    canon_seen = set()
-    matches = []
+def find_farthest_source(source_list, vars_dict):
+    """Punto 2 (v4.2). Tra le SOLE formule sorgenti gia' presenti nel documento,
+    restituisce quella il cui valore assoluto e' massimo (il punto piu' lontano
+    da 0 lungo l'asse). Serve come ANCORA per i riferimenti in sottrazione.
+    NON inventa formule: sceglie solo tra quelle reali."""
+    best = None
+    best_abs = -1.0
+    for s in source_list:
+        if not s:
+            continue
+        val, err = safe_eval(s, vars_dict)
+        if err is not None or val is None:
+            continue
+        if abs(val) > best_abs:
+            best_abs = abs(val)
+            best = s
+    return best
 
+
+def expr_for_gap(gap, vars_dict, tol):
+    """Termini (col segno) il cui VALORE eguaglia 'gap', con la loro classe di
+    COMPLESSITA': 0 = variabile singola (un pannello), 1 = composto/mezzo/
+    multiplo di spessore, 2 = combinazione di due variabili. Ritorna una lista
+    di tuple (termine, complessita'). Serve a costruire 'vicino + termine' =
+    target; il termine deve valere lo scarto reale entro tolleranza."""
+    out = []
+    seen = set()
+
+    def add(s, val, cplx):
+        if abs(val - gap) <= tol:
+            c = canonical_form(s)
+            if c and c != "0" and c not in seen:
+                seen.add(c)
+                out.append((s, cplx))
+
+    # 0) variabili singole (il caso piu' comune: un pannello). Le variabili di
+    #    valore nullo (es. T non usata) si saltano: non spostano il valore e
+    #    introdurrebbero solo termini spuri.
+    for n in VAR_NAMES:
+        v = vars_dict.get(n)
+        if v is None or abs(v) <= tol:
+            continue
+        add("+" + n, v, 0)
+        add("-" + n, -v, 0)
+
+    # 1) termini composti di compensazione ((P-S), (A-S), ...)
+    for c in COMPOUND_TERMS:
+        cv, e = safe_eval(c, vars_dict)
+        if e is None and cv is not None:
+            add("+" + c, cv, 1)
+            add("-" + c, -cv, 1)
+
+    # 1bis) mezzi (mezzerie) per tutte le variabili; doppi/tripli SOLO per gli
+    #    spessori (S, E): L*2 o P*3 non hanno senso fisico nel blank.
+    for n in VAR_NAMES:
+        v = vars_dict.get(n)
+        if v is None or abs(v) <= tol:
+            continue
+        add("+" + n + "/2", v / 2.0, 1)
+        add("-" + n + "/2", -v / 2.0, 1)
+        if n in THICKNESS_VARS:
+            add("+" + n + "*2", v * 2.0, 1)
+            add("-" + n + "*2", -v * 2.0, 1)
+            add("+" + n + "*3", v * 3.0, 1)
+            add("-" + n + "*3", -v * 3.0, 1)
+
+    # 2) combinazioni di due variabili (scarto di due pannelli)
+    for i in range(len(VAR_NAMES)):
+        a = vars_dict.get(VAR_NAMES[i])
+        if a is None or abs(a) <= tol:
+            continue
+        na = VAR_NAMES[i]
+        for j in range(i, len(VAR_NAMES)):
+            b = vars_dict.get(VAR_NAMES[j])
+            if b is None or abs(b) <= tol:
+                continue
+            nb = VAR_NAMES[j]
+            add("+%s+%s" % (na, nb), a + b, 2)
+            add("+%s-%s" % (na, nb), a - b, 2)
+            add("-%s+%s" % (na, nb), -a + b, 2)
+            add("-%s-%s" % (na, nb), -a - b, 2)
+
+    return out
+
+
+def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
+    """Reverse lookup parametrico.
+
+    Priorita' dei candidati:
+      prio 0 -> COSTRUTTIVO: vicino reale +/- lo scarto geometrico reale
+                (il punto come somma cumulativa di pannelli); piu' l'ancora
+                "piu' lontano da 0" e i suoi riferimenti in sottrazione
+                (Punto 2 v4.2). Tutto derivato da formule REALI del documento;
+      prio 1 -> vicini geometrici e pool imparato dal documento (REALI);
+      prio 2 -> fallback combinatorio (INVENTATO, ultima risorsa).
+    L'ordinamento finale e' (prio, delta, lunghezza), cosi' i candidati
+    costruttivi reali precedono sempre quelli fabbricati. Filtro duplicati
+    sulla FORMA CANONICA.
+    """
+    canon_seen = set()
+    matches = []  # (display_expr, val, delta, status, prio)
+
+    # CASO SPECIALE: target == 0 -> unico suggerimento sensato e' "0".
     if abs(target) <= tol:
         return [("0", 0.0, 0.0, "ok")]
 
+    # Retrocompatibilita': accetta singola stringa o lista
     if source_exprs is None:
         source_list = []
     elif isinstance(source_exprs, str):
@@ -610,60 +802,140 @@ def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
     else:
         source_list = [s for s in source_exprs if s]
 
-    def try_candidate(expr_str):
+    # Soglia "ok" robusta (Punto 1 v4.2): assoluta + relativa minima.
+    ok_tol = tol + REL_EPS * abs(target)
+
+    # Variabili "morte": valore ~0 (es. T non usata). Un termine che le contiene
+    # non sposta il valore (es. +T con T=0) ma sfuggirebbe al filtro canonico,
+    # comparendo come suggerimento-rumore. Le si scarta in modo DINAMICO: se la
+    # variabile diventa != 0 torna subito utilizzabile. I nomi sono lettere
+    # singole, quindi il test di appartenenza nella forma canonica e' sicuro.
+    dead_vars = set(n for n in VAR_NAMES
+                    if vars_dict.get(n) is None or abs(vars_dict.get(n, 0.0)) <= ok_tol)
+
+    def display_rank(s):
+        # Preferenza di scrittura: meno termini, poi piu' corta.
+        return (len(split_top_level_terms(s)), len(s))
+
+    canon_index = {}  # chiave canonica -> indice in matches
+
+    def try_candidate(expr_str, prio, rank2=10 ** 6):
         expr_str = expr_str.strip()
         if not expr_str:
             return
         canon = canonical_form(expr_str)
-        if canon == "0" or canon in canon_seen:
+        if canon == "0":
+            return
+        for dv in dead_vars:                 # scarta termini con variabili morte
+            if dv in canon:
+                return
+        display_expr = simplify_display(expr_str)
+        if canon in canon_seen:
+            # Stessa formula in altra veste: adotta la scrittura piu' pulita
+            # E il rango migliore -- la stessa formula puo' arrivare prima per
+            # una via tortuosa (rango alto) e poi per quella diretta.
+            idx = canon_index.get(canon)
+            if idx is not None:
+                old = matches[idx]
+                new_disp = old[0]
+                if display_rank(display_expr) < display_rank(old[0]):
+                    new_disp = display_expr
+                new_prio, new_rank = old[4], old[5]
+                if (prio, rank2) < (old[4], old[5]):
+                    new_prio, new_rank = prio, rank2
+                matches[idx] = (new_disp, old[1], old[2], old[3], new_prio, new_rank)
             return
         canon_seen.add(canon)
-        display_expr = canon if len(canon) < len(expr_str) else expr_str
-        # Normalizza i binomi di compensazione in forma '(V-S)' per
-        # rendere esplicito il lato su cui si scarica lo spessore cartone.
-        # La leggibilita' della compensazione ha priorita' sulla brevita',
-        # quindi applichiamo la normalizzazione anche se allunga la stringa.
-        display_expr = normalize_compensation(display_expr)
         val, err = safe_eval(display_expr, vars_dict)
         if err is not None or val is None:
             return
         delta = abs(val - target)
-        if delta <= tol:
-            matches.append((display_expr, val, delta, "ok"))
+        if delta <= ok_tol:
+            canon_index[canon] = len(matches)
+            matches.append((display_expr, val, delta, "ok", prio, rank2))
 
+    # === FASE 0a (COSTRUTTIVO): vicino reale + scarto geometrico reale ===
+    # Per i vicini piu' prossimi calcola lo scarto col target e cerca il
+    # termine che lo copre: 'src +/- termine'. Riproduce il blank come somma
+    # cumulativa di larghezze di pannello -> candidato fisicamente corretto.
+    # Limitato ai primi vicini (collect_source_formulas li ordina per distanza)
+    # sia per pertinenza sia per costo. Il sotto-ordine rank2 = (indice vicino,
+    # complessita' del termine) fa vincere lo SCARTO PIU' SEMPLICE (gap zero o
+    # un pannello singolo) e, a parita', il vicino piu' prossimo. La semplicita'
+    # del termine DOMINA la vicinanza: un vicino allineato ma raggiunto con una
+    # combinazione a due variabili non deve battere un vicino con gap nullo o
+    # a un solo pannello.
+    for ni, src in enumerate(source_list[:8]):
+        v_src, e_src = safe_eval(src, vars_dict)
+        if e_src is not None or v_src is None:
+            continue
+        src_terms = split_top_level_terms(src)
+        gap = target - v_src
+        if abs(gap) <= ok_tol:
+            try_candidate(join_terms(src_terms), 0, ni)        # gap zero: top
+            continue
+        for ti, (term, cplx) in enumerate(expr_for_gap(gap, vars_dict, ok_tol)):
+            try_candidate(join_terms(src_terms + [term]), 0,
+                          (cplx * 16 + ti + 1) * 32 + ni)
+
+    # === FASE 0b (PUNTO 2 v4.2): ANCORA "PIU' LONTANO DA 0" -> SOTTRAZIONE ===
+    # Individua tra le formule reali quella di modulo massimo e genera
+    # esplicitamente i riferimenti in sottrazione (ancora - V, ancora - (L-S)).
+    # Priorita' 0: precedono ogni altro candidato a parita' di delta.
+    farthest = find_farthest_source(source_list, vars_dict)
+    if farthest:
+        f_terms = split_top_level_terms(farthest)
+        try_candidate(join_terms(f_terms), 0)                 # l'ancora stessa
+        for v in VAR_NAMES:                                   # ancora - variabile
+            try_candidate(join_terms(f_terms + ["-" + v]), 0)
+        for c in COMPOUND_TERMS:                              # ancora - composto
+            try_candidate(join_terms(f_terms + ["-" + c]), 0)
+
+    # === FASE 1: vicini/pool reali (priorita' 1) ===
     for src in source_list:
         for cand in neighbor_candidates_from(src):
-            try_candidate(cand)
+            try_candidate(cand, 1)
 
+    # === FASE 2: fallback combinatorio INVENTATO (priorita' 2) ===
     if len(matches) < 5:
-        var_items = list(vars_dict.items())
+        # Solo variabili VIVE; multipli (X*2) solo per gli spessori S, E:
+        # L*2 o P*3 non corrispondono a nulla di fisico nel blank.
+        var_items = [(n, v) for (n, v) in vars_dict.items()
+                     if v is not None and abs(v) > ok_tol]
         for name, val in var_items:
-            try_candidate(name)
-            try_candidate("%s/2" % name)
-            try_candidate("%s*2" % name)
-            try_candidate("%s/3" % name)
-            try_candidate("%s/4" % name)
+            try_candidate(name, 2)
+            try_candidate("%s/2" % name, 2)
+            if name in THICKNESS_VARS:
+                try_candidate("%s*2" % name, 2)
+                try_candidate("%s*3" % name, 2)
+            try_candidate("%s/3" % name, 2)
+            try_candidate("%s/4" % name, 2)
         for i in range(len(var_items)):
             for j in range(len(var_items)):
                 if i == j:
                     continue
                 n1, _ = var_items[i]
                 n2, _ = var_items[j]
-                try_candidate("%s+%s" % (n1, n2))
-                try_candidate("%s-%s" % (n1, n2))
-                try_candidate("%s*2+%s" % (n1, n2))
-                try_candidate("%s*2-%s" % (n1, n2))
-                try_candidate("(%s-%s)/2" % (n1, n2))
-                try_candidate("(%s+%s)/2" % (n1, n2))
-                try_candidate("%s-%s*2" % (n1, n2))
-                try_candidate("%s+%s*2" % (n1, n2))
+                try_candidate("%s+%s" % (n1, n2), 2)
+                try_candidate("%s-%s" % (n1, n2), 2)
+                if n1 in THICKNESS_VARS:
+                    try_candidate("%s*2+%s" % (n1, n2), 2)
+                    try_candidate("%s*2-%s" % (n1, n2), 2)
+                try_candidate("(%s-%s)/2" % (n1, n2), 2)
+                try_candidate("(%s+%s)/2" % (n1, n2), 2)
+                if n2 in THICKNESS_VARS:
+                    try_candidate("%s-%s*2" % (n1, n2), 2)
+                    try_candidate("%s+%s*2" % (n1, n2), 2)
         for pat in ("L+P+S","L+P-S","L-S*2","P-S*2","(L-S*2)/2","(P-S*2)/2",
                     "A+P+S","A+P-S","A-S*2","A+T","A+T-S","A+T+S",
                     "L+C","L-C","P+E","P-E"):
-            try_candidate(pat)
+            try_candidate(pat, 2)
 
-    matches.sort(key=lambda t: t[2])
-    return matches[:max_results]
+    # Ordina per (priorita', sotto-ordine rank2, delta arrotondato, lunghezza).
+    # rank2 fa emergere, fra i costruttivi, il vicino piu' prossimo con lo
+    # scarto piu' semplice; per gli altri (default alto) decide delta/lunghezza.
+    matches.sort(key=lambda t: (t[4], t[5], round(t[2], 9), len(t[0])))
+    return [(e, v, d, s) for (e, v, d, s, p, r) in matches[:max_results]]
 
 
 # -----------------------------------------------------------------------------
@@ -801,7 +1073,7 @@ def show_param_dialog(x, y, vars_dict, tol,
                       source_ex=None, source_ey=None,
                       sources_x=None, sources_y=None,
                       preset_ex="", preset_ey="", preset_note=""):
-    """Dialogo di annotazione."""
+    """Dialogo di annotazione con validazione live."""
     fmt = "%." + str(DECIMALS) + "f"
 
     form = WinForms.Form()
@@ -1035,7 +1307,7 @@ def build_dot_text(x, y, ex, ey, note, status_x, status_y):
 
 
 # -----------------------------------------------------------------------------
-#  SOVRASCRITTURA (Punto 4) - basata sulla chiave geometrica
+#  SOVRASCRITTURA - basata sulla chiave geometrica
 # -----------------------------------------------------------------------------
 def find_existing_by_key(point_key, dot_key, tol):
     """Cerca punto e textdot esistenti con la chiave geometrica data."""
@@ -1106,12 +1378,231 @@ def delete_existing(point_obj, dot_obj):
 
 
 # -----------------------------------------------------------------------------
+#  SPECCHIA CURVE TAGGATE (Punto 3 v4.2)
+# -----------------------------------------------------------------------------
+def _object_userstrings(obj):
+    """Lista [(key, value), ...] di tutte le UserString dell'oggetto."""
+    out = []
+    try:
+        coll = obj.Attributes.GetUserStrings()
+    except Exception:
+        coll = None
+    if coll is not None:
+        try:
+            keys = list(coll.AllKeys)
+        except Exception:
+            keys = []
+        for k in keys:
+            if k is None:
+                continue
+            v = coll.Get(k)
+            if v:
+                out.append((k, v))
+    return out
+
+
+def _is_cyan(obj):
+    """True se il colore di visualizzazione dell'oggetto e' ciano (0,255,255),
+    con tolleranza (R basso, G e B alti). Risolve anche il colore ByLayer."""
+    c = None
+    try:
+        c = obj.Attributes.DrawColor(sc.doc)
+    except Exception:
+        try:
+            c = obj.Attributes.ObjectColor
+        except Exception:
+            return False
+    if c is None:
+        return False
+    return (c.R <= 80) and (c.G >= 160) and (c.B >= 160)
+
+
+def mirror_transform_for_curve(crv):
+    """Costruisce il Transform di mirror rispetto alla retta definita dalla
+    curva 'crv' (usa start/end). Il piano di mirror contiene la linea e l'asse
+    Z del mondo (lavoro 2D in XY: il riflesso e' sul lato opposto della linea).
+    Ritorna None se la linea e' degenere o verticale rispetto a Z."""
+    p0 = crv.PointAtStart
+    p1 = crv.PointAtEnd
+    d = p1 - p0
+    if d.Length < 1e-9:
+        return None
+    if not d.Unitize():
+        return None
+    up = Rhino.Geometry.Vector3d.ZAxis
+    normal = Rhino.Geometry.Vector3d.CrossProduct(d, up)
+    if normal.Length < 1e-9:
+        return None
+    if not normal.Unitize():
+        return None
+    return Rhino.Geometry.Transform.Mirror(p0, normal)
+
+
+def mirror_tagged_curves(tol):
+    """Specchia gruppi di curve lungo le rispettive linee di proiezione.
+
+      - CURVE da specchiare: UserString con CHIAVE (o valore, o Nome) "Proietta
+        su X" -- nella convenzione d'uso il tag e' nella CHIAVE con valore vuoto.
+      - LINEA di proiezione: colore CIANO, con CHIAVE (o valore, o Nome) "X".
+
+    Ogni curva "Proietta su X" e' specchiata sulla linea cyan "X". Il duplicato
+    eredita gli attributi (layer, ecc.); il tag "Proietta su X" viene RIMOSSO e
+    sostituito da "Specchiato da X" per evitare un nuovo mirror successivo.
+
+    Robustezza (v4.2): l'asse e' accettato solo se la sua etichetta coincide
+    ESATTAMENTE con una realmente referenziata da una "Proietta su X". Cosi' le
+    chiavi di pipeline (Status, Comando, P1_id, ...) non vengono mai scambiate
+    per assi. Il mirror e' una riflessione 2D rispetto alla retta della linea
+    cyan: vale per QUALSIASI orientamento (orizzontale, verticale, obliquo).
+    """
+    # Chiavi del pipeline da NON confondere con un'etichetta d'asse.
+    reserved = set([
+        "X_REALE", "Y_REALE", "X_PARAM", "Y_PARAM", "X_STATUS", "Y_STATUS",
+        "P1_ID", "P2_ID", "P1_PARAM", "P2_PARAM", "STATUS", "COMANDO",
+        "LUNGHEZZA", "TIPO_ORIGINALE", "SEQID", "NOME", "LAYER",
+    ])
+
+    axes = {}              # LABEL -> curve_geo (linea di proiezione cyan)
+    axis_seen_twice = set()
+    to_mirror = []         # (obj, geo, LABEL, src_key)
+    cyan_curves = []       # (obj, geo, us, name) da risolvere dopo
+    valid_labels = set()   # etichette REALMENTE referenziate da "Proietta su X"
+
+    def _find_proietta(us, name):
+        """Cerca 'Proietta su X' tra CHIAVI e VALORI delle UserString e nel
+        Nome. Ritorna (LABEL_upper, storage_key) oppure (None, None)."""
+        for k, v in us:
+            for field in (k, v):
+                if not field:
+                    continue
+                m = _PROIETTA_RE.match(field.strip())
+                if m:
+                    return m.group(1).strip().upper(), k
+        if name:
+            m = _PROIETTA_RE.match(name.strip())
+            if m:
+                return m.group(1).strip().upper(), "__name__"
+        return None, None
+
+    for obj in sc.doc.Objects:
+        if obj.IsDeleted:
+            continue
+        geo = obj.Geometry
+        if not isinstance(geo, Rhino.Geometry.Curve):
+            continue
+
+        us = _object_userstrings(obj)
+        name = obj.Attributes.Name or ""
+
+        # 1) Curva da specchiare? "Proietta su X" su chiave/valore/Nome.
+        proj_label, proj_key = _find_proietta(us, name)
+        if proj_label:
+            to_mirror.append((obj, geo, proj_label, proj_key))
+            valid_labels.add(proj_label)
+            continue  # una "Proietta su" non e' anche un asse
+
+        # 2) Possibile asse cyan: risolto dopo, contro valid_labels.
+        if _is_cyan(obj):
+            cyan_curves.append((obj, geo, us, name))
+
+    # --- risoluzione assi: solo linee cyan la cui CHIAVE/valore/Nome coincide
+    #     ESATTAMENTE con un'etichetta referenziata. ---
+    for obj, geo, us, name in cyan_curves:
+        lab = None
+        for k, v in us:
+            for field in (k, v):
+                if not field:
+                    continue
+                f = field.strip().upper()
+                if f and f not in reserved and f in valid_labels:
+                    lab = f
+                    break
+            if lab:
+                break
+        if lab is None and name and name.strip().upper() in valid_labels:
+            lab = name.strip().upper()
+        if lab:
+            if lab in axes:
+                axis_seen_twice.add(lab)
+            else:
+                axes[lab] = geo
+
+    # --- nessuna curva taggata: avvisa e termina ---
+    if not to_mirror:
+        WinForms.MessageBox.Show(
+            "Nessuna curva con tag 'Proietta su <etichetta>' trovata.\n\n"
+            "Assegna alle curve da specchiare una UserString con CHIAVE\n"
+            "'Proietta su A' (o B, C...) e disegna la linea di proiezione in\n"
+            "colore CIANO con UserString di CHIAVE 'A' (o B, C...).",
+            "Specchia curve taggate",
+            WinForms.MessageBoxButtons.OK,
+            WinForms.MessageBoxIcon.Information)
+        return
+
+    # --- applica il mirror ---
+    created = 0
+    new_ids = []
+    unmatched = []
+
+    for obj, geo, label, src_key in to_mirror:
+        if label not in axes:
+            unmatched.append(label)
+            continue
+        xform = mirror_transform_for_curve(axes[label])
+        if xform is None:
+            unmatched.append(label)
+            continue
+        dup = geo.DuplicateCurve()
+        if dup is None:
+            continue
+        if not dup.Transform(xform):
+            continue
+        attr = obj.Attributes.Duplicate()   # Duplicate() richiesto da RhinoCommon
+        if src_key == "__name__":
+            attr.Name = ""
+        elif src_key is not None:
+            # Con il tag sulla CHIAVE, cambiarne il valore non basta: la chiave
+            # 'Proietta su X' continuerebbe a combaciare e la curva verrebbe
+            # ri-specchiata. La si RIMUOVE: passare None a SetUserString cancella
+            # la UserString in RhinoCommon.
+            attr.SetUserString(src_key, None)
+        # Marcatore anti ri-mirror con valore NON vuoto (un valore vuoto sarebbe
+        # rimosso da RhinoCommon).
+        attr.SetUserString("Specchiato da %s" % label, "si")
+        new_id = sc.doc.Objects.AddCurve(dup, attr)
+        if new_id != System.Guid.Empty:
+            created += 1
+            new_ids.append(new_id)
+
+    if new_ids:
+        sc.doc.Objects.UnselectAll()
+        for nid in new_ids:
+            sc.doc.Objects.Select(nid)
+    sc.doc.Views.Redraw()
+
+    # --- report ---
+    msg = "Specchiate %d curva/e su %d totali." % (created, len(to_mirror))
+    if unmatched:
+        uniq = sorted(set(unmatched))
+        msg += ("\n\nEtichette senza linea di proiezione cyan corrispondente:\n  "
+                + ", ".join(uniq))
+    if axis_seen_twice:
+        msg += ("\n\nEtichette con piu' di una linea cyan (usata la prima):\n  "
+                + ", ".join(sorted(axis_seen_twice)))
+    print "PKG Annotator v4.2 - mirror: %d/%d curve specchiate." % (
+        created, len(to_mirror))
+    WinForms.MessageBox.Show(msg, "Specchia curve taggate",
+                             WinForms.MessageBoxButtons.OK,
+                             WinForms.MessageBoxIcon.Information)
+
+
+# -----------------------------------------------------------------------------
 def show_summary_dialog(records):
     if not records:
         return
 
     form = WinForms.Form()
-    form.Text = "Riepilogo sessione - PKG Annotator v4.1"
+    form.Text = "Riepilogo sessione - PKG Annotator v4.2"
     form.Width = 780
     form.Height = 480
     form.StartPosition = WinForms.FormStartPosition.CenterScreen
@@ -1179,10 +1670,10 @@ def show_summary_dialog(records):
 
 
 # -----------------------------------------------------------------------------
-#  CREAZIONE / AGGIORNAMENTO PUNTO  (v4)
+#  CREAZIONE / AGGIORNAMENTO PUNTO
 # -----------------------------------------------------------------------------
 def create_provisional_point(pt, point_key, idx_pts):
-    """Crea SUBITO il Point al clic, prima del dialogo (novita' v4)."""
+    """Crea SUBITO il Point al clic, prima del dialogo (visibilita' al clic)."""
     fmt = "%." + str(DECIMALS) + "f"
     attr_pt = Rhino.DocObjects.ObjectAttributes()
     attr_pt.LayerIndex  = idx_pts
@@ -1195,10 +1686,6 @@ def create_provisional_point(pt, point_key, idx_pts):
         if rh_obj:
             rh_obj.Attributes.SetUserString("X_reale", fmt % pt.X)
             rh_obj.Attributes.SetUserString("Y_reale", fmt % pt.Y)
-            # FIX v4.1: scrivo pair_id gia' sul provvisorio (= point_key).
-            # E' l'identificatore geometrico stabile che l'exporter legge
-            # per popolare P1_id / P2_id / Centro_id.
-            rh_obj.Attributes.SetUserString("pair_id", point_key)
             rh_obj.Attributes.SetUserString("PKG_provvisorio", "1")
             sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
         sc.doc.Views.Redraw()
@@ -1206,7 +1693,7 @@ def create_provisional_point(pt, point_key, idx_pts):
 
 
 def rollback_provisional_point(pt_guid):
-    """Cancella il punto provvisorio creato al clic."""
+    """Cancella il punto provvisorio creato al clic (su Salta/Annulla)."""
     if pt_guid is None or pt_guid == System.Guid.Empty:
         return
     sc.doc.Objects.Delete(pt_guid, True)
@@ -1214,9 +1701,7 @@ def rollback_provisional_point(pt_guid):
 
 
 def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
-    """Aggiorna gli UserString del punto provvisorio gia' creato, rendendolo
-    definitivo (rimuove il flag PKG_provvisorio). Ritorna l'oggetto Rhino
-    aggiornato o None."""
+    """Aggiorna gli UserString del punto provvisorio, rendendolo definitivo."""
     fmt = "%." + str(DECIMALS) + "f"
     if pt_guid == System.Guid.Empty:
         return None
@@ -1230,11 +1715,8 @@ def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
     rh_obj.Attributes.SetUserString("X_status", sx)
     rh_obj.Attributes.SetUserString("Y_status", sy)
     rh_obj.Attributes.SetUserString("Nota",     note if note else "")
-    # FIX v4.1: ribadisco pair_id anche in finalizzazione, cosi' resta
-    # coerente anche se il punto e' stato creato da una versione precedente.
-    rh_obj.Attributes.SetUserString("pair_id",  point_key)
-    rh_obj.Attributes.SetUserString("PKG_provvisorio", "")  # non piu' provvisorio
-    rh_obj.Attributes.Name = point_key  # chiave pulita, niente nota
+    rh_obj.Attributes.SetUserString("PKG_provvisorio", "")
+    rh_obj.Attributes.Name = point_key
     sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
     return rh_obj
 
@@ -1263,19 +1745,30 @@ def main():
     while True:
         gp = Rhino.Input.Custom.GetPoint()
         gp.SetCommandPrompt(
-            "Punto #%d - calamita Fine/Medio  (Invio per terminare)" % (count + 1))
-        gp.Get()
+            "Punto #%d - calamita Fine/Medio  (Invio=fine, opzione SpecchiaCurve)" % (count + 1))
+        gp.AcceptNothing(True)
+        idx_opt_mirror = gp.AddOption("SpecchiaCurve")
+        res = gp.Get()
 
-        if gp.CommandResult() != Rhino.Commands.Result.Success:
+        # Opzione "SpecchiaCurve" (Punto 3 v4.2)
+        if res == Rhino.Input.GetResult.Option:
+            if gp.OptionIndex() == idx_opt_mirror:
+                mirror_tagged_curves(tol)
+            continue
+
+        # Invio (Nothing) o Esc (Cancel) o altro -> termina la sessione
+        if res != Rhino.Input.GetResult.Point:
             break
 
         pt = gp.Point()
         x  = pt.X
         y  = pt.Y
 
+        # === Chiavi geometriche del nuovo punto ===
         point_key = make_point_key(x, y)
         dot_key   = make_dot_key(x, y)
 
+        # === Sovrascrittura: cerca e cancella eventuali duplicati ===
         old_pt_obj, old_dot_obj, preset = find_existing_by_key(point_key, dot_key, tol)
         is_overwrite = (old_pt_obj is not None)
         if is_overwrite:
@@ -1284,8 +1777,10 @@ def main():
                 point_key, n_removed)
             sc.doc.Views.Redraw()
 
+        # === VISIBILITA' AL CLIC ===
         prov_guid = create_provisional_point(pt, point_key, idx_pts)
 
+        # === Reverse lookup sorgente: pool di vicini geometrici ===
         sources_x, sources_y = collect_source_formulas(
             pt, k_neighbors=3, exclude_at_zero_dist=True, tol=tol)
         source_ex = sources_x[0] if sources_x else None
@@ -1299,6 +1794,7 @@ def main():
             preset_ey=preset["Y_param"],
             preset_note=preset["Nota"])
 
+        # === Gestione esito del dialogo ===
         if expr_x is None:
             rollback_provisional_point(prov_guid)
             break
@@ -1307,8 +1803,10 @@ def main():
             rollback_provisional_point(prov_guid)
             continue
 
+        # === Finalizza il punto provvisorio ===
         finalize_point(prov_guid, point_key, x, y, expr_x, expr_y, sx, sy, note)
 
+        # === Crea il TextDot, colore in base alla completezza ===
         dot_text = build_dot_text(x, y, expr_x, expr_y, note, sx, sy)
         pt_dot   = Point3d(pt.X + DOT_OFFSET_X, pt.Y + DOT_OFFSET_Y, pt.Z)
         td       = TextDot(dot_text, pt_dot)
@@ -1341,7 +1839,7 @@ def main():
     if count > 0:
         show_summary_dialog(records)
 
-    print "PKG Annotator v4.1: %d punto/i creato/i o aggiornato/i." % count
+    print "PKG Annotator v4.2: %d punto/i creato/i o aggiornato/i." % count
 
 
 if __name__ == "__main__":
