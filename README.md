@@ -28,7 +28,7 @@ Each script takes basic box dimensions width, depth, height, board thickness and
 | `ECMA_A20_20_03_01.py` | A20.20.03.01 | Reverse Tuck End | ✅ Published | ![    ](docs/ECMA_A20_20_03_01.png) |
 | `ECMA_A20_20_01_01.py` | A20.20.01.01 | Straight Tuck End | ✅ Published | ![    ](docs/ECMA_A20_20_01_01.png) |
 | `ECMA_A01_55_00_01.py` | A01.55.00.01 | Crash-lock bottom | ✅ Published | ![    ](docs/ECMA_A01_55_00_01.png) |
-| `FEFCO_0412.py` | FEFCO 0412 | One Piece Folder | ✅ Published | ![    ](docs/ECMA_A01_55_00_01.png) |
+| `FEFCO_0412.py` | FEFCO 0412 | One Piece Folder | ✅ Published | ![    ](docs/FEFCO_0412.png) |
 
 **Input parameters:**
 - **L** — Width (main panel)
