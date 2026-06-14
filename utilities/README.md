@@ -9,5 +9,5 @@ Script di utilità per il lavoro parametrico.
 | `PKG_Annotator.py` | Inserimento punti per regole parametriche. |
 | `PKG_Quota_Assistita.py` | Inserimento assistito delle quote con regole parametriche. |
 | `Esporta_Geometrie_Parametrico.py` |Esporta la selezione aplicando le regole parametriche. |
-| `PKG_Esegue_Parametrico.py` |Legge il TXT generato da Esporta_Geometrie_Parametrico.py (senza prompt per LLM) e produce il tracciato parametrico. |
+| `PKG_Esegue_Parametrico.py` |Legge il TXT generato da Esporta_Geometrie_Parametrico.py (senza prompt per LLM) e produce il tracciato parametrico. Utile per non passare dal LLM e accedere al proprio archivio personalizato di packaging. |
 | `PKG_Verifica_Forma.py` |Legge il TXT generato da Esporta_Geometrie_Parametrico.py e ridisegna in Magenta per verificarne l'esattezza. |
