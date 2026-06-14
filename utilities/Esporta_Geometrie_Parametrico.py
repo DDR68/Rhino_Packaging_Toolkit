@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Script: Esporta_Geometrie_Parametrico.py
-Versione: 5.1
+Versione: 5.3
 Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscriptsyntax)
 
 UNIFICA:
@@ -20,6 +20,42 @@ AGGIUNTE (robustezza e usabilita'):
   - [Prompt LLM] Opzione (checkbox nel dialogo) per anteporre al TXT un
     prompt che istruisce un LLM a generare lo script parametrico dai dati.
     Il file diventa autoportante (istruzioni + dati). Vedi _llm_prompt_header.
+
+NOVITA V.5.3 rispetto a V.5.2:
+  - [Specchiatura] L'export riconosce i BLOCCHI DI SPECCHIATURA: gli oggetti
+    con UserString 'Blocco'=N (N = ordine di esecuzione) sono raggruppati;
+    dentro ogni blocco la linea CYAN e' l'asse di riflessione. Nuove colonne
+    'Blocco' e 'Ruolo' (AsseSpecchio sulla linea cyan) e un riepilogo blocchi
+    in testa al TXT (asse: coordinate + forma parametrica se gli estremi sono
+    punti annotati). NESSUNA geometria viene specchiata in Rhino: e' lo script
+    parametrico generato dall'LLM a riflettere, in ordine di blocco. Caso
+    gestito: SCATOLA INTERA (origine + copia restano entrambe). Le PATELLE
+    (origine che sparisce) sono rimandate.
+  - [Prompt LLM] Riscritto e ampliato: riconoscimento degli assi (Ruolo o
+    layer non strutturale = linea cyan); specchiatura come ULTIMA operazione
+    con l'asse RICOSTRUITO dalla formula e poi CANCELLATO (non resta nella
+    fustella); semantica del raggio di raccordo nei punti (un termine di
+    raggio marca la tangenza di un arco); variabili L, P, A, S con default e
+    input GetNumber; auto-verifica del combaciamento sull'asse.
+  - [Precisione pair_id] L'identificatore dei punti passa da millimetro intero
+    a 0.001 mm (la stessa risoluzione del match geometrico), cosi' due vertici
+    vicini - tipici con bevel e spessore - non collassano piu' sullo stesso
+    id. Formato leggibile: PKG_X+0100.000_Y-0030.500.
+
+NOVITA V.5.2 rispetto a V.5.1 (correzioni):
+  - [FIX stale su curve SALTATE] Una curva che NON supera la propagazione
+    (estremo orfano, tipo non gestito, ...) ma possiede gia' UserText
+    parametrico da una passata precedente viene RIPULITA (PARAM_KEYS
+    rimosse). In V.5.1 la pulizia avveniva solo dentro _write_user_text,
+    cioe' solo per le curve ri-propagate con successo: una curva spostata,
+    modificata, o un duplicato specchiato (SpecchiaCurve di PKG_Annotator
+    <= v4.3) che ereditava lo UserText dell'originale veniva esportata con
+    formule di una geometria che non esiste piu' e Status=associato.
+    Le curve ripulite sono conteggiate nel report ('param_stale_ripuliti').
+  - [Contratto pair_id] PKG_Annotator >= v4.4 scrive esplicitamente la
+    UserString 'pair_id' sui punti. Il fallback dalle coordinate
+    (make_pair_id_from_xy) resta per i punti annotati con QUALSIASI
+    versione precedente (fino alla v4.3 inclusa la chiave non era scritta).
 
 NOVITA V.5.1 rispetto a V.5.0 (correzioni):
   - [FIX stale-ref] Dopo la propagazione (ModifyAttributes) gli oggetti curva
@@ -88,6 +124,28 @@ PARAM_KEYS = [
 
 
 # ============================================================
+#  COSTANTI SPECCHIATURA (linee cyan + blocchi)  [v5.3]
+# ============================================================
+
+# Numero di blocco nel testo utente dell'oggetto: raggruppa le geometrie che
+# condividono lo stesso asse di specchiatura e ne indica l'ORDINE di
+# esecuzione (1, 2, ...). Chiave proposta; rinominala qui se nel disegno usi
+# un altro nome.
+MIRROR_BLOCK_KEY = "Blocco"
+
+# Ruolo emesso nel TXT sulla linea d'asse (per l'LLM: non e' geometria da
+# tracciare, e' solo l'asse di riflessione).
+MIRROR_ROLE_KEY  = "Ruolo"
+MIRROR_AXIS_ROLE = "AsseSpecchio"
+
+# La linea di specchiatura e' riconosciuta dal COLORE cyan (0,255,255), per
+# oggetto o per layer. Tolleranza per-canale ampia ma sicura (il blu 0,0,255
+# resta escluso: ha G lontano da 255).
+COLOR_CYAN_RGB = (0, 255, 255)
+CYAN_CH_TOL    = 40
+
+
+# ============================================================
 #  HELP DIALOG (Eto.Forms)
 # ============================================================
 
@@ -97,7 +155,7 @@ def show_help():
     import Eto.Drawing as ed
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.1 - Guida"
+    dlg.Title = "Esporta Geometrie Parametrico v5.3 - Guida"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(680, 560)
     dlg.Resizable = True
@@ -107,7 +165,7 @@ def show_help():
     layout.DefaultSpacing = ed.Size(4, 4)
 
     title = ef.Label()
-    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.1"
+    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.3"
     title.Font = ed.Font(ed.SystemFont.Bold, 13)
     layout.AddRow(title)
     layout.AddRow(ef.Label(Text=""))
@@ -161,6 +219,23 @@ def show_help():
     layout.AddRow(col)
     layout.AddRow(ef.Label(Text=""))
 
+    sec_mir = ef.Label()
+    sec_mir.Text = "SPECCHIATURA (v5.3)"
+    sec_mir.Font = ed.Font(ed.SystemFont.Bold, 11)
+    layout.AddRow(sec_mir)
+
+    mir = ef.Label()
+    mir.Text = ("Gli oggetti con UserString 'Blocco'=N formano un blocco\n"
+                "(N e' anche l'ordine di esecuzione). Dentro il blocco, la\n"
+                "linea CYAN e' l'asse di specchiatura. L'export raggruppa per\n"
+                "blocco, marca l'asse con Ruolo=AsseSpecchio e ne riassume gli\n"
+                "estremi (anche parametrici) in testa al TXT. Lo script\n"
+                "parametrico generato riflette ogni blocco sul suo asse, in\n"
+                "ordine, poi cancella l'asse (di servizio); per la scatola\n"
+                "intera origine e copia restano entrambe.")
+    layout.AddRow(mir)
+    layout.AddRow(ef.Label(Text=""))
+
     sec_fmt = ef.Label()
     sec_fmt.Text = "FORMATO OUTPUT"
     sec_fmt.Font = ed.Font(ed.SystemFont.Bold, 11)
@@ -199,7 +274,7 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     result = {"export": False, "include_prompt": True}
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.1 - Report"
+    dlg.Title = "Esporta Geometrie Parametrico v5.3 - Report"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(480, 320)
     dlg.Resizable = False
@@ -272,14 +347,18 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
 # ============================================================
 
 def make_pair_id_from_xy(x, y):
-    """FIX v5.1: ricostruisce il pair_id con lo STESSO schema di
-    PKG_Annotator.make_point_key, per i punti annotati prima della v4.1
-    (che non scrivevano la chiave 'pair_id')."""
-    ix = int(round(x))
-    iy = int(round(y))
-    sx = "+" if ix >= 0 else "-"
-    sy = "+" if iy >= 0 else "-"
-    return "PKG_X%s%04d_Y%s%04d" % (sx, abs(ix), sy, abs(iy))
+    """Identificatore geometrico del punto. A risoluzione FINE: 0.001 mm, la
+    stessa del match (ROUND_DIGITS). A millimetro intero due vertici distinti
+    entro 0.5 mm avrebbero lo stesso id, e in cartotecnica bevel e spessore
+    creano coordinate sub-millimetriche: la risoluzione fine evita il collasso.
+    Formato leggibile, con segno e decimali: PKG_X+0100.000_Y-0030.500.
+    PKG_Annotator non scrive la UserString 'pair_id' in alcuna versione,
+    quindi questa e' SEMPRE la via con cui l'id viene costruito."""
+    def tok(v):
+        r = round(v, ROUND_DIGITS)
+        s = "+" if r >= 0 else "-"
+        return "%s%0*.*f" % (s, 8, ROUND_DIGITS, abs(r))
+    return "PKG_X%s_Y%s" % (tok(x), tok(y))
 
 
 def _parse_user_text_dict(rh_object):
@@ -317,6 +396,36 @@ def _write_user_text(rh_object, data_dict):
     return sc.doc.Objects.ModifyAttributes(rh_object, new_attrs, True)
 
 
+def _clean_stale_param_keys(rh_object):
+    """FIX v5.2: rimuove le PARAM_KEYS da una curva che NON supera la
+    propagazione ma le possiede da una passata precedente.
+
+    Casi reali: curva spostata o modificata dopo una propagazione riuscita;
+    duplicato creato da SpecchiaCurve (PKG_Annotator <= v4.3) che ereditava
+    lo UserText parametrico dell'originale. Senza pulizia, l'export
+    emetterebbe per quella curva formule e Status=associato riferiti a una
+    geometria che non esiste piu' (Centro_geom e Punto_medio sono per giunta
+    coordinate assolute pre-modifica).
+
+    La presenza della chiave 'Comando' fa da sentinella: e' scritta solo
+    dalla propagazione. Ritorna True se l'oggetto e' stato modificato."""
+    if rh_object is None:
+        return False
+    try:
+        has_param = rh_object.Attributes.GetUserString("Comando")
+    except Exception:
+        has_param = None
+    if not has_param:
+        return False
+    new_attrs = rh_object.Attributes.Duplicate()
+    for k in PARAM_KEYS:
+        try:
+            new_attrs.DeleteUserString(k)
+        except Exception:
+            pass
+    return sc.doc.Objects.ModifyAttributes(rh_object, new_attrs, True)
+
+
 def _collect_param_points():
     """Costruisce { (x_round, y_round) : {param_x, param_y, pair_id} }
     leggendo i punti del layer LAYER_PUNTI con X_status=ok e Y_status=ok."""
@@ -349,8 +458,10 @@ def _collect_param_points():
         loc = pt_geom.Location
         key = (round(loc.X, ROUND_DIGITS), round(loc.Y, ROUND_DIGITS))
 
-        # FIX v5.1: pair_id da UserString; se assente (annotator < v4.1)
-        # lo ricostruisco dalle coordinate con lo schema dell'annotator.
+        # pair_id: PKG_Annotator non scrive questa UserString in nessuna
+        # versione, quindi l'id viene SEMPRE ricostruito dalle coordinate
+        # (a 0.001 mm). Il ramo 'da UserString' resta pronto se in futuro
+        # l'annotator inizia a scriverla (deve usare lo stesso schema).
         pid = ut.get("pair_id", "")
         if not pid:
             pid = make_pair_id_from_xy(loc.X, loc.Y)
@@ -661,6 +772,13 @@ def propaga_parametrico(curve_objs):
         if ut_data is None:
             saltate += 1
             reasons[esito] = reasons.get(esito, 0) + 1
+            # FIX v5.2: la curva saltata puo' portare UserText parametrico
+            # di una passata precedente (curva modificata, o duplicato di
+            # SpecchiaCurve che lo ha ereditato): va ripulito, altrimenti
+            # l'export lo emette come se fosse ancora valido.
+            if _clean_stale_param_keys(obj):
+                reasons["param_stale_ripuliti"] = \
+                    reasons.get("param_stale_ripuliti", 0) + 1
             continue
         ok = _write_user_text(obj, ut_data)
         if ok:
@@ -846,10 +964,11 @@ def detect_geometry(curve):
 COLUMNS = ["ID", "Tipo", "Geom", "Nome", "Layer",
            "X1", "Y1", "X2", "Y2",
            "R", "CX", "CY", "AngS", "AngE",
-           "Len", "Deg", "Pts", "CP", "Sampled", "UserText"]
+           "Len", "Deg", "Pts", "CP", "Sampled",
+           "Blocco", "Ruolo", "UserText"]
 
 
-def row_for_point(idx, obj, usertext_override=None):
+def row_for_point(idx, obj, usertext_override=None, block="-", role="-"):
     pt = obj.Geometry.Location
     ut = usertext_override if usertext_override is not None else get_user_text(obj)
     row = {
@@ -861,12 +980,14 @@ def row_for_point(idx, obj, usertext_override=None):
         "X1": fmt(pt.X),
         "Y1": fmt(pt.Y),
         "X2": fmt(pt.Z),
+        "Blocco": block,
+        "Ruolo": role,
         "UserText": ut,
     }
     return row
 
 
-def row_for_segment(idx, obj, segment, tipo, usertext_override=None):
+def row_for_segment(idx, obj, segment, tipo, usertext_override=None, block="-", role="-"):
     p0 = segment.PointAtStart
     p1 = segment.PointAtEnd
     geom_tag, extra = detect_geometry(segment)
@@ -883,6 +1004,8 @@ def row_for_segment(idx, obj, segment, tipo, usertext_override=None):
         "X2": fmt(p1.X),
         "Y2": fmt(p1.Y),
         "Len": fmt(segment.GetLength()),
+        "Blocco": block,
+        "Ruolo": role,
         "UserText": ut,
     }
 
@@ -923,66 +1046,213 @@ def _refetch(obj):
     return obj
 
 
+# ============================================================
+#  SPECCHIATURA: rilevamento blocchi e assi cyan  [v5.3]
+# ============================================================
+
+def _effective_color(obj):
+    """Colore effettivo dell'oggetto (per-oggetto se impostato, senno' del
+    layer). Stessa logica di classify_curve."""
+    attr = obj.Attributes
+    if attr.ColorSource == rd.ObjectColorSource.ColorFromLayer:
+        return sc.doc.Layers[attr.LayerIndex].Color
+    return attr.ObjectColor
+
+
+def _is_cyan(color):
+    cr, cg, cb = COLOR_CYAN_RGB
+    return (abs(int(color.R) - cr) <= CYAN_CH_TOL and
+            abs(int(color.G) - cg) <= CYAN_CH_TOL and
+            abs(int(color.B) - cb) <= CYAN_CH_TOL)
+
+
+def _block_number(obj):
+    """Numero di blocco dell'oggetto (UserString MIRROR_BLOCK_KEY) o ''."""
+    try:
+        v = obj.Attributes.GetUserString(MIRROR_BLOCK_KEY)
+    except Exception:
+        v = None
+    return (v or "").strip()
+
+
+def _is_cyan_axis_line(obj):
+    """True se l'oggetto e' una linea (curva lineare) di colore cyan: l'asse
+    di specchiatura del suo blocco."""
+    g = obj.Geometry
+    if not isinstance(g, rg.Curve):
+        return False
+    if not g.IsLinear(Rhino.RhinoMath.ZeroTolerance):
+        return False
+    return _is_cyan(_effective_color(obj))
+
+
+def _resolve_mirror_blocks(objs):
+    """Raggruppa gli oggetti per numero di blocco e, in ogni blocco, individua
+    la linea cyan come asse. Ritorna (block_of, axis_ids, blocks):
+      block_of : { obj.Id(str) : numero }
+      axis_ids : set( obj.Id(str) ) delle linee-asse scelte
+      blocks   : { numero : {"members":[obj], "axis":obj|None} }
+    """
+    blocks = {}
+    block_of = {}
+    for obj in objs:
+        n = _block_number(obj)
+        if not n:
+            continue
+        block_of[str(obj.Id)] = n
+        b = blocks.get(n)
+        if b is None:
+            b = {"members": [], "axis": None}
+            blocks[n] = b
+        b["members"].append(obj)
+        if b["axis"] is None and _is_cyan_axis_line(obj):
+            b["axis"] = obj
+    axis_ids = set(str(b["axis"].Id) for b in blocks.values()
+                   if b["axis"] is not None)
+    return block_of, axis_ids, blocks
+
+
+def _mirror_summary_lines(blocks):
+    """Righe di commento '# ...' che riassumono i blocchi di specchiatura per
+    l'LLM: asse (coordinate + forma parametrica se nota) e n. membri."""
+    out = []
+    if not blocks:
+        return out
+    out.append("# BLOCCHI DI SPECCHIATURA (numero = ordine di esecuzione):")
+    for n in sorted(blocks.keys(), key=lambda s: (len(s), s)):
+        b = blocks[n]
+        ax = b["axis"]
+        nm = len(b["members"])
+        if ax is None:
+            out.append("#   Blocco %s: [nessuna linea cyan nel blocco] - "
+                       "membri: %d" % (n, nm))
+            continue
+        g = _refetch(ax).Geometry
+        p0 = g.PointAtStart
+        p1 = g.PointAtEnd
+        ut = _parse_user_text_dict(_refetch(ax))
+        p1p = ut.get("P1_param", "")
+        p2p = ut.get("P2_param", "")
+        par = ""
+        if p1p or p2p:
+            par = "  asse_param: %s -> %s" % (p1p or "?", p2p or "?")
+        out.append("#   Blocco %s: asse (%.3f,%.3f)->(%.3f,%.3f)%s  membri: %d"
+                   % (n, p0.X, p0.Y, p1.X, p1.Y, par, nm))
+    return out
+
+
 def _llm_prompt_header():
     """Testo del prompt da anteporre al TXT quando l'utente lo richiede.
     Rende il file autoportante: chi lo riceve (un LLM) ha davanti sia le
-    istruzioni sia i dati per generare lo script parametrico.
-
-    Tenuto come costante qui per facilita' di modifica e per evitare
-    dipendenze da file esterni (robustezza per uno strumento condiviso).
-    Se in futuro si vorra' caricarlo da un .md esterno, questo e' l'unico
-    punto da cambiare."""
+    istruzioni sia i dati per generare lo script parametrico. Unico punto da
+    modificare se in futuro lo si vorra' caricare da un .md esterno."""
     return (
-        "=== ISTRUZIONI PER LA GENERAZIONE DELLO SCRIPT PARAMETRICO ===\n"
-        "\n"
-        "Scrivi professionalmente uno script per Rhino 7 e 8 (IronPython 2.7,\n"
-        "RhinoCommon, prima riga \"#! python 2\") che generi il packaging\n"
-        "descritto piu' sotto in modo PARAMETRICO, mantenendo l'unita di\n"
-        "misura in mm.\n"
-        "\n"
-        "Specifiche di stile e convenzioni del toolkit (apri se hai accesso web):\n"
-        "- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/"
-        "refs/heads/main/docs/llm-knowledge/prompts/ironpython-examples.md\n"
-        "- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/"
-        "refs/heads/main/docs/llm-knowledge/prompts/rhino-ironpython.md\n"
-        "Se NON puoi accedere ai link, segui comunque queste regole minime:\n"
-        "solo RhinoCommon e scriptcontext (no rhinoscriptsyntax), niente\n"
-        "f-string, stringhe in formato %, header UTF-8, selezione via\n"
-        "Rhino.Input.Custom.\n"
-        "\n"
-        "COME LEGGERE I DATI CHE SEGUONO\n"
-        "- Ogni riga e' un oggetto geometrico, colonne separate da TAB.\n"
-        "- Le variabili packaging (es. L, P, A, S, C, T, E) hanno valori\n"
-        "  definiti nel disegno; le formule nel blocco UserText le combinano.\n"
-        "- Il blocco UserText (ultima colonna) contiene le coppie chiave=valore\n"
-        "  che definiscono il RAPPORTO PARAMETRICO di ogni geometria:\n"
-        "    Linea   -> P1_param, P2_param  (estremi come formule)\n"
-        "    Cerchio -> Centro_param, Raggio\n"
-        "    Arco    -> P1_param, P2_param, Punto_medio (tre punti), Raggio\n"
-        "    Raccordo conico -> P1_param, P2_param, CtrlProp_u, CtrlProp_v,\n"
-        "                       CtrlPeso_w\n"
-        "    Curva libera    -> CtrlPoints (x,y,w | ...), Nodi, Grado\n"
-        "- Le coordinate X1,Y1,X2,Y2 sono i valori NUMERICI attuali (per\n"
-        "  riferimento); la forma parametrica sta nelle formule del blocco\n"
-        "  UserText.\n"
-        "\n"
-        "COSA DEVI PRODURRE\n"
-        "Uno script che definisca le variabili in testa (cosi' che\n"
-        "modificandole il disegno si riscali), costruisca tutte le geometrie\n"
-        "dalle loro formule, e le disegni nei layer corretti (Taglio,\n"
-        "Cordone, MezzoTaglio, Foratore).\n"
-        "\n"
-        "AUTO-VERIFICA (obbligatoria)\n"
-        "Al termine, controlla lo script confrontando la geometria che produce\n"
-        "con i dati qui sotto: per ogni punto, verifica che la formula\n"
-        "valutata coi valori delle variabili ridia le coordinate numeriche\n"
-        "indicate; per archi e raccordi verifica estremi, raggio e lato.\n"
-        "Segnala e CORREGGI ogni inesattezza prima di restituire la versione\n"
-        "finale.\n"
-        "\n"
-        "=== GEOMETRIE E RAPPORTI PARAMETRICI DEL PACKAGING ===\n"
-    )
+"""=== ISTRUZIONI PER LA GENERAZIONE DELLO SCRIPT PARAMETRICO ===
 
+Scrivi professionalmente uno script per Rhino 7 e 8 (IronPython 2.7,
+RhinoCommon, prima riga "#! python 2") che generi il packaging
+descritto piu' sotto in modo PARAMETRICO, mantenendo l'unita di
+misura in mm.
+
+Specifiche di stile e convenzioni del toolkit (apri se hai accesso web):
+- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/refs/heads/main/docs/llm-knowledge/prompts/ironpython-examples.md
+- https://raw.githubusercontent.com/DDR68/Rhino_Packaging_Toolkit/refs/heads/main/docs/llm-knowledge/prompts/rhino-ironpython.md
+Se NON puoi accedere ai link, segui comunque queste regole minime:
+solo RhinoCommon e scriptcontext (no rhinoscriptsyntax), niente
+f-string, stringhe in formato %, header UTF-8, print a singolo
+argomento, input/selezione via Rhino.Input.
+
+COME LEGGERE I DATI CHE SEGUONO
+- Ogni riga e' un oggetto geometrico, colonne separate da TAB.
+- Le variabili packaging (es. L, P, A, S, C, T, E) hanno valori
+  definiti nel disegno; le formule nel blocco UserText le combinano.
+- Il blocco UserText (ultima colonna) contiene le coppie chiave=valore
+  che definiscono il RAPPORTO PARAMETRICO di ogni geometria:
+    Linea   -> P1_param, P2_param  (estremi come formule)
+    Cerchio -> Centro_param, Raggio
+    Arco    -> P1_param, P2_param, Punto_medio (tre punti), Raggio
+    Raccordo conico -> P1_param, P2_param, CtrlProp_u, CtrlProp_v,
+                       CtrlPeso_w
+    Curva libera    -> CtrlPoints (x,y,w | ...), Nodi, Grado
+- Le coordinate X1,Y1,X2,Y2 sono i valori NUMERICI attuali (solo per
+  riferimento e verifica); la forma parametrica sta nelle formule del
+  blocco UserText. Costruisci SEMPRE dalle formule, non dai numeri.
+- Le coordinate parametriche dei punti possono incorporare il RAGGIO di
+  raccordo tra due linee: un punto la cui formula contiene un termine di
+  raggio e' il punto di TANGENZA dove un raccordo ad arco incontra una
+  linea. Due tangenze adiacenti delimitano un arco di raccordo (di norma
+  un quarto di cerchio): ricostruiscilo come arco esatto, non come
+  spezzata.
+
+COME RICONOSCERE GLI ASSI DI SPECCHIO (linee cyan)
+- Gli assi di specchiatura NON sono geometria da fustellare. Una linea
+  e' un ASSE se soddisfa anche solo uno di questi criteri:
+    (a) colonna Ruolo = AsseSpecchio;  OPPURE
+    (b) Layer NON strutturale, cioe' diverso da Taglio, Cordone,
+        MezzoTaglio, Foratore (tipicamente Layer 'Disegno'): nel
+        disegno corrisponde a una LINEA CYAN.
+  Vale ANCHE se le colonne Ruolo e Blocco sono '-'. In questi dati la
+  linea su Layer 'Disegno' (bordo orizzontale superiore) e' l'ASSE,
+  NON un taglio: non confonderla con la geometria.
+- La colonna Blocco, quando valorizzata, raggruppa le geometrie che
+  condividono lo stesso asse; se vale '-', considera un unico asse per
+  l'intera figura.
+
+SPECCHIATURA E PULIZIA (ULTIME operazioni dello script)
+- Il tracciato esportato e' di norma una META' (o una porzione) della
+  fustella: l'asse indica dove riflettere per ottenere l'INTERO.
+- L'asse e' di SERVIZIO: si ricostruisce solo per riflettere e si
+  CANCELLA alla fine. Nella fustella prodotta non deve restare.
+- Esegui queste come ULTIME operazioni, dopo aver costruito tutte le
+  geometrie origine:
+    1. Ricostruisci OGNI asse in modo PARAMETRICO dai suoi P1_param/
+       P2_param (se assenti, usa gli estremi numerici). Ricavalo dalla
+       FORMULA, non da una linea disegnata a mano, e NON cercarlo nel
+       documento Rhino.
+    2. Rifletti le geometrie origine rispetto alla RETTA dell'asse e
+       MANTIENI sia origine sia copia (scatola intera). Con piu'
+       blocchi, applica gli assi in ordine crescente di Blocco.
+    3. CANCELLA l'asse (o gli assi): e' l'ultimissima operazione. Nel
+       risultato finale non deve restare alcuna linea d'asse.
+- Poiche' l'asse nasce dalle stesse formule del bordo, giace ESATTAMENTE
+  sull'edge condiviso: le due meta' devono COMBACIARE, senza distacco ne
+  sovrapposizione. Se risultano STACCATE, l'asse e' posizionato male:
+  ricavalo dalla FORMULA.
+- (Le PATELLE, dove l'origine sparisce e resta solo la copia, non sono
+  gestite in questa versione: tratta tutto come scatola intera.)
+
+COSA DEVI PRODURRE
+Uno script che:
+- definisca in testa le variabili packaging (almeno L, P, A, S; aggiungi
+  C, T, E se compaiono nelle formule) come valori di DEFAULT e le CHIEDA
+  all'avvio con Rhino.Input.RhinoGet.GetNumber (Invio = valore di
+  default), cosi' che modificandole la fustella si riscali;
+- costruisca tutte le geometrie dalle loro formule;
+- come ULTIME operazioni: ricostruisca l'asse parametrico, applichi le
+  specchiature (scatola intera, meta' unite sull'asse) e infine CANCELLI
+  l'asse;
+- disegni nei layer corretti: Taglio (nero), Cordone (rosso),
+  MezzoTaglio, Foratore. Nel risultato finale NON resta alcun asse.
+
+NOTE DI RICOSTRUZIONE (fedelta')
+- Curve libere/Bezier che approssimano un raccordo a 90 gradi vanno
+  ricostruite come ARCHI di cerchio esatti (quarto di cerchio): piu'
+  pulite per la fustella e comunque parametriche.
+- Piccoli scostamenti numerici dell'export (ordine del mezzo mm) vanno
+  arrotondati al valore che CHIUDE la geometria sul bordo o sul raccordo
+  adiacente.
+
+AUTO-VERIFICA (obbligatoria)
+Al termine, controlla lo script confrontando la geometria prodotta con
+i dati qui sotto: per ogni punto verifica che la formula valutata coi
+valori delle variabili ridia le coordinate numeriche indicate; per
+archi e raccordi verifica estremi, raggio e lato; verifica inoltre che
+dopo la specchiatura le due meta' COMBACINO sull'asse e che nessuna
+linea d'asse sia rimasta nel risultato. Segnala e CORREGGI ogni
+inesattezza prima di restituire la versione finale.
+
+=== GEOMETRIE E RAPPORTI PARAMETRICI DEL PACKAGING ===
+""")
 
 def export_objects(curve_objs, point_objs, include_prompt=False):
     """Genera il contenuto TXT e lo salva."""
@@ -993,13 +1263,21 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
     all_bbox = rg.BoundingBox.Empty
     idx = 1
 
+    # Specchiatura: blocchi + assi cyan (v5.3)
+    block_of, axis_ids, blocks = _resolve_mirror_blocks(
+        list(point_objs) + list(curve_objs))
+
     # Punti
     for obj in point_objs:
         obj = _refetch(obj)  # FIX v5.1
         pt = obj.Geometry.Location
         bb = rg.BoundingBox(pt, pt)
         all_bbox.Union(bb)
-        rows.append(row_for_point(idx, obj))
+        _oid = str(obj.Id)
+        rows.append(row_for_point(
+            idx, obj,
+            block=block_of.get(_oid, "-"),
+            role=(MIRROR_AXIS_ROLE if _oid in axis_ids else "-")))
         idx += 1
         n_total += 1
 
@@ -1009,6 +1287,9 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
         curve = obj.Geometry
         tipo = classify_curve(obj)
         ut = get_user_text(obj)  # letto UNA volta dall'oggetto fresco
+        _oid = str(obj.Id)
+        _blk = block_of.get(_oid, "-")
+        _role = MIRROR_AXIS_ROLE if _oid in axis_ids else "-"
         bb = curve.GetBoundingBox(True)
         if bb.IsValid:
             all_bbox.Union(bb)
@@ -1017,7 +1298,9 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
                                   or isinstance(curve, rg.PolylineCurve)):
             n_exploded += 1
         for seg in segments:
-            rows.append(row_for_segment(idx, obj, seg, tipo, usertext_override=ut))
+            rows.append(row_for_segment(idx, obj, seg, tipo,
+                                        usertext_override=ut,
+                                        block=_blk, role=_role))
             idx += 1
             n_total += 1
 
@@ -1042,6 +1325,8 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
     lines.append("# Tipo: T=Taglio C=Cordone M=MezzoTaglio F=Foratore P=Point")
     lines.append("# Angoli archi: convenzione con segno (CW = negativo)")
     lines.append("# Colonne: " + "  ".join(COLUMNS))
+    for _ml in _mirror_summary_lines(blocks):
+        lines.append(_ml)
 
     for r in rows:
         lines.append(format_row(r))
@@ -1087,7 +1372,7 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
 
 def main():
     print("=" * 60)
-    print("ESPORTA GEOMETRIE PARAMETRICO v5.1")
+    print("ESPORTA GEOMETRIE PARAMETRICO v5.3")
     print("=" * 60)
 
     selected = list(sc.doc.Objects.GetSelectedObjects(False, False))
