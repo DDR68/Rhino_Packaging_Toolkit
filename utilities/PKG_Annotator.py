@@ -2,7 +2,78 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PACKAGING POINT ANNOTATOR  v4.3  -  Rhino 7 / 8  (IronPython 2.7)
+#  PACKAGING POINT ANNOTATOR  v4.7  -  Rhino 7 / 8  (IronPython 2.7)
+#
+#  Novita' v4.7 (RIMOZIONE MOTORE DI SUGGERIMENTO + PULIZIA DOT):
+#    - Tolto il motore di suggerimento (suggest_formulas, show_suggest_dialog
+#      e gli helper canonical_form / neighbor_candidates_from / expr_for_gap /
+#      find_farthest_source / collect_source_formulas). I candidati
+#      combinatori "inventavano" formule non dichiarate; la fonte di verita'
+#      sono le QUOTE assistite (sempre visibili a schermo) e i PUNTI gia'
+#      annotati, di cui l'utente si assume la responsabilita'. Resta tutto
+#      cio' che VERIFICA: precompilazione certa al 100% (certain_formulas_for),
+#      validazione live (verde/giallo/rosso) e "Preleva -> X / Y" da quote e
+#      punti. L'unica capacita' persa e' la proposta euristica; la copia da
+#      punto allineato 'ok' resta dentro la precompilazione certa.
+#    - Tolto il sottosistema TextDot residuo: niente piu' layer "Quote" creato
+#      a vuoto a ogni avvio, niente make_dot_key / DOT_OFFSET / ramo dot in
+#      find_existing_by_key. La migrazione cleanup_legacy_dots (rimozione dei
+#      vecchi TextDot dai file pre-v4.4) RESTA: e' cio' che li elimina.
+#
+#  Novita' v4.6 (RIMOZIONE SPECCHIA CURVE):
+#    - Tolta l'opzione "SpecchiaCurve" e tutta la logica di mirror delle
+#      curve taggate "Proietta su X" lungo le linee cyan. Specchiava la
+#      GEOMETRIA delle curve, non i PUNTI di annotazione: non era cio' che
+#      serve. La simmetria del tracciato sara' gestita a valle, dallo
+#      script parametrico, dopo il calcolo delle nuove misure (richiede
+#      una modifica allo script di esportazione, non all'annotator).
+#      L'annotator torna a occuparsi solo dei punti parametrici.
+#
+#  Eredita da v4.5 (PRELEVA DA QUOTE E DA PUNTI):
+#    - Nel dialogo, "Preleva -> X" / "Preleva -> Y": accoda nel campo la
+#      formula di quote-funzione (PlainText) e/o di punti annotati
+#      (X_param o Y_param secondo l'asse).
+#
+#    - Nel dialogo di annotazione, accanto a "Suggerisci...", due pulsanti
+#      "Preleva -> X" e "Preleva -> Y": si selezionano in Rhino una o piu'
+#      QUOTE-funzione e/o PUNTI gia' annotati, e la formula giusta viene
+#      ACCODATA nel campo corrispondente:
+#        - da una quota-funzione: il suo PlainText;
+#        - da un punto annotato:  la sua X_param se stai prelevando per X,
+#          la Y_param se per Y (l'asse e' deciso dal pulsante premuto).
+#      Ogni formula composita e' avvolta tra parentesi (convenzione visiva
+#      dei gruppi) e concatenata con '+'; il segno si corregge a mano.
+#      Comodo per costruire la posizione di un punto come somma dei tratti
+#      gia' quotati o come "coordinata di un punto vicino +/- uno scarto".
+#    - PATTERN ANTI-BLOCCO (lezione di Quota_Assistita v1.3): un dialogo
+#      modale, anche nascosto, DISABILITA la finestra di Rhino e il
+#      GetObject non riceverebbe input. Quindi il pulsante CHIUDE il
+#      dialogo conservando il testo di X, Y e Nota; la selezione avviene
+#      in contesto Rhino normale; il dialogo RIAPRE con i campi
+#      conservati e la formula prelevata accodata al campo scelto.
+#      Il punto provvisorio in lavorazione e' escluso dalla selezione.
+#
+#  Novita' v4.4 (LEGGIBILITA'):
+#    - NIENTE PIU' TEXTDOT: le note testuali accanto ai punti toglievano
+#      leggibilita' al tracciato e duplicavano informazioni gia' presenti
+#      nelle UserString del punto (X_param/Y_param/X_status/Y_status/Nota).
+#      Non vengono piu' create.
+#    - COMPLETEZZA = COLORE DEL PUNTO: il Point stesso ora porta lo stato:
+#        GRIGIO (105,105,105) = completo (X e Y entrambi ok/approx)
+#        GIALLO (220,180,0)   = incompleto
+#      Il punto provvisorio (appena cliccato, dialogo aperto) resta col
+#      colore del layer (blu): tre stati distinguibili a colpo d'occhio.
+#    - PULIZIA LEGACY: all'avvio lo script conta i TextDot delle versioni
+#      precedenti (Name che inizia con 'PKG_DOT_') e chiede se rimuoverli
+#      in blocco; in piu' RICOLORA automaticamente i punti gia' annotati
+#      in base al loro X_status/Y_status, cosi' anche i file vecchi
+#      adottano subito la nuova convenzione. La sovrascrittura puntuale
+#      continua comunque a eliminare il TextDot legacy associato.
+#    - PARSER: min() e max() ammessi nelle formule (allineamento con
+#      PKG_Quota_Assistita >= v1.4). Esempio: min(L/2, (T+(P+S))/2)
+#      per una patella che non deve mai superare meta' larghezza.
+#    - finalize_point usa Attributes.Duplicate() prima di
+#      ModifyAttributes (pattern robusto gia' adottato altrove).
 #
 #  Novita' v4.3 (motore di suggerimento):
 #    - fase COSTRUTTIVA: vicino reale + scarto geometrico (somma di pannelli)
@@ -42,19 +113,6 @@
 #        Il fallback combinatorio (che invece "inventa") resta solo come ultima
 #        risorsa, con priorita' piu' bassa.
 #
-#    [3] SPECCHIA CURVE TAGGATE (mirror lungo una linea)
-#        Nuova opzione "SpecchiaCurve" nel prompt di acquisizione punti.
-#        Specchia gruppi di linee/curve lungo una linea di proiezione:
-#          - le CURVE da specchiare portano una UserString con valore
-#            "Proietta su A" (oppure B, C...);
-#          - la LINEA di proiezione e' colorata CIANO e porta una UserString
-#            con valore "A" (oppure B, C...).
-#        Ogni curva "Proietta su X" viene specchiata sulla linea cyan "X".
-#        Il riflesso e' creato sul lato opposto della linea (piano di mirror
-#        contenente la linea e l'asse Z del mondo). La nota "Proietta su X" sul
-#        duplicato viene sostituita con "Specchiato da X" per non rispecchiarlo
-#        di nuovo. Semplifica molto l'inserimento del mezzo simmetrico.
-#
 #  Eredita da v4.0:
 #    - VISIBILITA' AL CLIC: il Point e' creato e disegnato SUBITO dopo il clic.
 #    - ROLLBACK PULITO su "Salta"/"Annulla tutto".
@@ -72,38 +130,27 @@ import System.Windows.Forms as WinForms
 import System.Drawing as Drawing
 import math
 import re
-from Rhino.Geometry import Point3d, TextDot
+from Rhino.Geometry import Point3d
 
 # -----------------------------------------------------------------------------
 DECIMALS     = 4
-DOT_HEIGHT   = 10
-DOT_FONT     = "Consolas"
+VERSION      = "4.7"
 LAYER_POINTS = "PKG_Punti_Parametrici"
-LAYER_DOTS   = "Quote"
 COLOR_POINTS = System.Drawing.Color.FromArgb(0, 80, 180)
-COLOR_DOTS   = System.Drawing.Color.FromArgb(105, 105, 105)
-DOT_OFFSET_X = 5.0
-DOT_OFFSET_Y = 3.0
 
 # Soglia relativa minima aggiunta alla tolleranza assoluta nel confronto "ok"
 # (Punto 1 v4.2). Sub-micron in pratica: blinda il confronto su coordinate di
 # grande modulo senza allentare la precisione geometrica.
 REL_EPS = 1e-9
 
-# Colori TextDot per stato di completezza
-COLOR_DOT_COMPLETE   = Drawing.Color.FromArgb(105, 105, 105)   # grigio: X e Y entrambi compilati e validi
-COLOR_DOT_INCOMPLETE = Drawing.Color.FromArgb(220, 180, 0)     # giallo: mancanze (Nota esclusa dal calcolo)
+# Colori del PUNTO per stato di completezza (v4.4: niente piu' TextDot,
+# lo stato e' portato dal colore del Point stesso)
+COLOR_PT_COMPLETE   = Drawing.Color.FromArgb(105, 105, 105)   # grigio: X e Y entrambi compilati e validi
+COLOR_PT_INCOMPLETE = Drawing.Color.FromArgb(220, 180, 0)     # giallo: mancanze (Nota esclusa dal calcolo)
 
 VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
 
-# Termini COMPOSTI aggiungibili nel reverse lookup.
-COMPOUND_TERMS = ["(L-S)", "(P-S)", "(A-S)"]
 
-# Variabili di SPESSORE: per queste i multipli (S*2, S*3, E*2) hanno senso
-# fisico (compensazioni di spessore del materiale). Per le altre (L, P, A, C)
-# un multiplo come L*2 o P*3 non corrisponde a nulla nel blank e indurrebbe
-# in errore: i pannelli ripetuti si scrivono come somma (C+P-S+L+P+L).
-THICKNESS_VARS = ["S", "E"]
 VAR_LABELS = {
     "L": "Larghezza",
     "P": "Profondita",
@@ -126,15 +173,16 @@ ALLOWED_FUNCS = {
     "cos":  math.cos,
     "tan":  math.tan,
     "pi":   math.pi,
+    # v4.4: formule condizionali (allineato a PKG_Quota_Assistita >= v1.4)
+    # min = tetto (es. min(L/2, (T+(P+S))/2)), max = minimo garantito.
+    "min":  min,
+    "max":  max,
 }
 
 COLOR_OK      = Drawing.Color.FromArgb(0,   140, 0)
 COLOR_APPROX  = Drawing.Color.FromArgb(190, 130, 0)
 COLOR_ERR     = Drawing.Color.FromArgb(190, 30,  30)
 COLOR_NEUTRAL = Drawing.Color.FromArgb(110, 110, 110)
-
-# Regex per il riconoscimento delle note di proiezione (Punto 3 v4.2)
-_PROIETTA_RE = re.compile(r"^\s*proietta\s+su\s+(.+?)\s*$", re.IGNORECASE)
 
 
 # -----------------------------------------------------------------------------
@@ -148,15 +196,6 @@ def make_point_key(x, y):
     sx = "+" if ix >= 0 else "-"
     sy = "+" if iy >= 0 else "-"
     return "PKG_X%s%04d_Y%s%04d" % (sx, abs(ix), sy, abs(iy))
-
-
-def make_dot_key(x, y):
-    """Chiave per il TextDot associato a un punto."""
-    ix = int(round(x))
-    iy = int(round(y))
-    sx = "+" if ix >= 0 else "-"
-    sy = "+" if iy >= 0 else "-"
-    return "PKG_DOT_X%s%04d_Y%s%04d" % (sx, abs(ix), sy, abs(iy))
 
 
 # -----------------------------------------------------------------------------
@@ -379,75 +418,8 @@ def show_params_dialog(preset=None, conflict_names=None):
 
 
 # -----------------------------------------------------------------------------
-#  REVERSE LOOKUP - basato sul vicino geometrico
+#  ALGEBRA DELLE FORMULE - helper condivisi (quote, preleva, display)
 # -----------------------------------------------------------------------------
-def collect_source_formulas(target_pt, k_neighbors=3, exclude_at_zero_dist=False, tol=1e-6):
-    """Raccoglie un POOL di formule sorgenti per il reverse lookup.
-    Ritorna (sources_x, sources_y) ordinate per priorita', senza duplicati
-    e senza stringhe vuote."""
-    idx = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
-    if idx < 0:
-        return [], []
-
-    entries = []
-
-    for obj in sc.doc.Objects:
-        if obj.IsDeleted:
-            continue
-        if obj.Attributes.LayerIndex != idx:
-            continue
-        if not isinstance(obj.Geometry, Rhino.Geometry.Point):
-            continue
-        p = obj.Geometry.Location
-        dx = p.X - target_pt.X
-        dy = p.Y - target_pt.Y
-        d = math.sqrt(dx * dx + dy * dy)
-        if exclude_at_zero_dist and d <= tol:
-            continue
-        ex = obj.Attributes.GetUserString("X_param") or ""
-        ey = obj.Attributes.GetUserString("Y_param") or ""
-        if ex == "--": ex = ""
-        if ey == "--": ey = ""
-        entries.append((abs(dx), abs(dy), ex, ey))
-
-    if not entries:
-        return [], []
-
-    # Ordinamento PER ASSE (v4.3). Per la formula X il vicino piu' informativo
-    # e' quello allineato in ORIZZONTALE (|dy| minimo: il gap in X e' la
-    # larghezza di un pannello); per la Y quello allineato in VERTICALE
-    # (|dx| minimo: il gap in Y e' l'altezza di un pannello). E' il motivo per
-    # cui con l'ordinamento euclideo unico la X usciva bene e la Y spesso no.
-    entries_x = sorted(entries, key=lambda t: (t[1], t[0]))
-    entries_y = sorted(entries, key=lambda t: (t[0], t[1]))
-
-    sources_x = []
-    sources_y = []
-    seen_x = set()
-    seen_y = set()
-
-    for adx, ady, ex, ey in entries_x:
-        if ex and ex not in seen_x:
-            sources_x.append(ex)
-            seen_x.add(ex)
-    for adx, ady, ex, ey in entries_y:
-        if ey and ey not in seen_y:
-            sources_y.append(ey)
-            seen_y.add(ey)
-
-    return sources_x, sources_y
-
-
-def find_nearest_annotated_point(target_pt, exclude_at_zero_dist=False, tol=1e-6):
-    """Wrapper retrocompatibile: ritorna la PRIMA sorgente del pool."""
-    sx_list, sy_list = collect_source_formulas(
-        target_pt, k_neighbors=1,
-        exclude_at_zero_dist=exclude_at_zero_dist, tol=tol)
-    ex = sx_list[0] if sx_list else None
-    ey = sy_list[0] if sy_list else None
-    return ex, ey, None
-
-
 def split_top_level_terms(expr):
     """Spezza un'espressione nei suoi termini di somma di primo livello,
     rispettando le parentesi. Ogni termine porta con se' il proprio segno."""
@@ -495,110 +467,98 @@ def join_terms(terms):
     return out
 
 
-_MONO_RE = re.compile(r"^([A-Z])$|^([A-Z])/(\d+)$|^([A-Z])\*(\d+)$|^(\d+)\*([A-Z])$")
+# -----------------------------------------------------------------------------
+#  PRELEVA DA QUOTE (v4.5, portato da PKG_Quota_Assistita v1.2/1.3)
+# -----------------------------------------------------------------------------
+def wrap_if_composite(expr):
+    """Avvolge tra parentesi una formula con piu' termini di primo livello,
+    se non e' gia' interamente racchiusa da UNA coppia di parentesi.
+    E' la convenzione visiva dei gruppi: ogni tratto del tracciato resta
+    riconoscibile dentro la formula composta."""
+    expr = (expr or "").strip()
+    if not expr:
+        return expr
+    if expr.startswith("(") and expr.endswith(")"):
+        depth = 0
+        wrapped = True
+        for i in range(len(expr)):
+            ch = expr[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0 and i < len(expr) - 1:
+                    wrapped = False   # la prima parentesi chiude prima della fine
+                    break
+        if wrapped:
+            return expr
+    if len(split_top_level_terms(expr)) > 1:
+        return "(" + expr + ")"
+    return expr
 
 
-def _gcd(a, b):
-    while b:
-        a, b = b, a % b
-    return a
+def pick_formulas(axis, exclude_id=None):
+    """Selezione in Rhino di QUOTE-funzione e/o PUNTI annotati; ritorna la
+    lista delle formule da accodare, nell'ordine di selezione.
+      - da una LinearDimension: il suo PlainText;
+      - da un Point sul layer LAYER_POINTS: X_param se axis=='X',
+        Y_param se axis=='Y'.
+    Scarta gli oggetti senza formula valida (con avviso) e il punto
+    provvisorio in lavorazione ('exclude_id'). 'axis' e' 'X' o 'Y'."""
+    out = []
+    idx_pts = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
 
+    go = Rhino.Input.Custom.GetObject()
+    go.SetCommandPrompt(
+        "Seleziona quote-funzione e/o punti annotati per %s "
+        "(Invio=conferma, Esc=annulla)" % axis)
+    go.GeometryFilter = (Rhino.DocObjects.ObjectType.Annotation |
+                         Rhino.DocObjects.ObjectType.Point)
+    go.SubObjectSelect = False
+    go.EnablePreSelect(False, True)
+    res = go.GetMultiple(1, 0)
+    if res != Rhino.Input.GetResult.Object:
+        return out
 
-def _expand_signed_terms(expr, outer_sign, out):
-    """Espande ricorsivamente i termini additivi di primo livello aprendo le
-    parentesi che avvolgono una somma: '-(P-S)' -> -P, +S. Le parentesi
-    ridondanti attorno a un singolo monomio ('(P/2)') vengono rimosse."""
-    for t in split_top_level_terms(expr):
-        if not t:
+    for i in range(go.ObjectCount):
+        obj = go.Object(i).Object()
+        if obj is None:
             continue
-        if t[0] == "-":
-            s = -outer_sign
-            body = t[1:].strip()
-        elif t[0] == "+":
-            s = outer_sign
-            body = t[1:].strip()
-        else:
-            s = outer_sign
-            body = t.strip()
-        if not body:
-            continue
-        if body.startswith("(") and body.endswith(")"):
-            depth = 0
-            wraps = True
-            for i in range(len(body)):
-                ch = body[i]
-                if ch == "(":
-                    depth += 1
-                elif ch == ")":
-                    depth -= 1
-                    if depth == 0 and i < len(body) - 1:
-                        wraps = False
-                        break
-            if wraps:
-                inner = body[1:-1].strip()
-                if len(split_top_level_terms(inner)) > 1:
-                    _expand_signed_terms(inner, s, out)
-                    continue
-                body = inner
-        out.append((s, body))
+        if exclude_id is not None and obj.Id == exclude_id:
+            continue                          # punto provvisorio in lavorazione
+        geo = obj.Geometry
 
-
-def canonical_form(expr):
-    """CHIAVE canonica per confronto e deduplicazione (NON per il display).
-    Espande le parentesi additive e aggrega i monomi X, X/n, X*n, n*X con
-    coefficienti RAZIONALI. Cosi' 'C+(P-S)+L' e 'C+P-S+L' hanno la stessa
-    chiave, e '(P/2)+A+P/2' coincide con 'A+P'. I monomi non riconosciuti
-    restano atomi opachi. Ritorna '0' se tutto si annulla."""
-    pairs = []
-    try:
-        _expand_signed_terms(expr, 1, pairs)
-    except Exception, ex:
-        return expr.strip()
-    coeffs = {}
-    for s, body in pairs:
-        is_num = False
-        fv = 0.0
-        try:
-            fv = float(body)
-            is_num = True
-        except ValueError:
-            pass
-        if is_num:
-            if fv == 0.0:
+        # --- QUOTA: PlainText ---
+        if isinstance(geo, Rhino.Geometry.LinearDimension):
+            try:
+                t = (geo.PlainText or "").strip()
+            except Exception, ex:
+                t = ""
+            if not t or not any(n in t for n in VAR_NAMES):
+                print "Preleva: quota senza formula ('%s'), saltata." % t
                 continue
-            key = "#" + body
-            num, den = s, 1
-        else:
-            m = _MONO_RE.match(body.replace(" ", ""))
-            if m:
-                if m.group(1):
-                    key, num, den = m.group(1), s, 1
-                elif m.group(2):
-                    key, num, den = m.group(2), s, int(m.group(3))
-                elif m.group(4):
-                    key, num, den = m.group(4), s * int(m.group(5)), 1
-                else:
-                    key, num, den = m.group(7), s * int(m.group(6)), 1
-            else:
-                key, num, den = body, s, 1
-        on, od = coeffs.get(key, (0, 1))
-        n2 = on * den + num * od
-        d2 = od * den
-        if n2 == 0:
-            coeffs[key] = (0, 1)
-        else:
-            g = _gcd(abs(n2), d2)
-            coeffs[key] = (n2 // g, d2 // g)
-
-    parts = []
-    for key in sorted(coeffs.keys()):
-        num, den = coeffs[key]
-        if num == 0:
+            out.append(t)
             continue
-        parts.append("%s:%d/%d" % (key, num, den))
-    if not parts:
-        return "0"
-    return "|".join(parts)
+
+        # --- PUNTO ANNOTATO: X_param / Y_param secondo l'asse ---
+        if isinstance(geo, Rhino.Geometry.Point):
+            if idx_pts >= 0 and obj.Attributes.LayerIndex != idx_pts:
+                print "Preleva: punto fuori dal layer annotazioni, saltato."
+                continue
+            key = "X_param" if axis == "X" else "Y_param"
+            f = obj.Attributes.GetUserString(key) or ""
+            f = f.strip()
+            if not f or f == "--":
+                print "Preleva: punto senza %s, saltato." % key
+                continue
+            out.append(f)
+            continue
+
+        print "Preleva: oggetto non valido (ne' quota ne' punto), saltato."
+
+    sc.doc.Objects.UnselectAll()
+    sc.doc.Views.Redraw()
+    return out
 
 
 def simplify_display(expr):
@@ -637,456 +597,17 @@ def simplify_display(expr):
     return join_terms(kept)
 
 
-def neighbor_candidates_from(expr_source):
-    """Varianti della formula sorgente per riduzione e aggiunta di un termine."""
-    candidates = []
-    terms = split_top_level_terms(expr_source)
-    if not terms:
-        for v in VAR_NAMES:
-            candidates.append(v)
-            candidates.append("-" + v)
-        return candidates
-
-    existing = set(terms)
-
-    # 1) Riduzione di testa e coda
-    if len(terms) > 1:
-        candidates.append(join_terms(terms[:-1]))
-        candidates.append(join_terms(terms[1:]))
-
-    # 1bis) Riduzione interna
-    if len(terms) > 2:
-        for i in range(1, len(terms) - 1):
-            candidates.append(join_terms(terms[:i] + terms[i+1:]))
-
-    # 2) Aggiunta in coda, con filtro strutturale
-    for v in VAR_NAMES:
-        plus  = "+" + v
-        minus = "-" + v
-        if minus not in existing:
-            candidates.append(join_terms(terms + [plus]))
-        if plus not in existing:
-            candidates.append(join_terms(terms + [minus]))
-
-    # 2bis) Aggiunta in coda dei termini COMPOSTI di compensazione
-    for c in COMPOUND_TERMS:
-        plus  = "+" + c
-        minus = "-" + c
-        if plus not in existing:
-            candidates.append(join_terms(terms + [plus]))
-        if minus not in existing:
-            candidates.append(join_terms(terms + [minus]))
-
-    # 3) Aggiunta in testa, stesso filtro
-    for v in VAR_NAMES:
-        plus  = "+" + v
-        minus = "-" + v
-        if minus not in existing:
-            candidates.append(join_terms([plus] + terms))
-        if plus not in existing:
-            candidates.append(join_terms([minus] + terms))
-
-    # 3bis) Aggiunta in testa dei termini COMPOSTI
-    for c in COMPOUND_TERMS:
-        plus  = "+" + c
-        minus = "-" + c
-        if plus not in existing:
-            candidates.append(join_terms([plus] + terms))
-        if minus not in existing:
-            candidates.append(join_terms([minus] + terms))
-
-    # 4) La sorgente stessa
-    candidates.append(join_terms(terms))
-
-    return candidates
-
-
-def find_farthest_source(source_list, vars_dict):
-    """Punto 2 (v4.2). Tra le SOLE formule sorgenti gia' presenti nel documento,
-    restituisce quella il cui valore assoluto e' massimo (il punto piu' lontano
-    da 0 lungo l'asse). Serve come ANCORA per i riferimenti in sottrazione.
-    NON inventa formule: sceglie solo tra quelle reali."""
-    best = None
-    best_abs = -1.0
-    for s in source_list:
-        if not s:
-            continue
-        val, err = safe_eval(s, vars_dict)
-        if err is not None or val is None:
-            continue
-        if abs(val) > best_abs:
-            best_abs = abs(val)
-            best = s
-    return best
-
-
-def expr_for_gap(gap, vars_dict, tol):
-    """Termini (col segno) il cui VALORE eguaglia 'gap', con la loro classe di
-    COMPLESSITA': 0 = variabile singola (un pannello), 1 = composto/mezzo/
-    multiplo di spessore, 2 = combinazione di due variabili. Ritorna una lista
-    di tuple (termine, complessita'). Serve a costruire 'vicino + termine' =
-    target; il termine deve valere lo scarto reale entro tolleranza."""
-    out = []
-    seen = set()
-
-    def add(s, val, cplx):
-        if abs(val - gap) <= tol:
-            c = canonical_form(s)
-            if c and c != "0" and c not in seen:
-                seen.add(c)
-                out.append((s, cplx))
-
-    # 0) variabili singole (il caso piu' comune: un pannello). Le variabili di
-    #    valore nullo (es. T non usata) si saltano: non spostano il valore e
-    #    introdurrebbero solo termini spuri.
-    for n in VAR_NAMES:
-        v = vars_dict.get(n)
-        if v is None or abs(v) <= tol:
-            continue
-        add("+" + n, v, 0)
-        add("-" + n, -v, 0)
-
-    # 1) termini composti di compensazione ((P-S), (A-S), ...)
-    for c in COMPOUND_TERMS:
-        cv, e = safe_eval(c, vars_dict)
-        if e is None and cv is not None:
-            add("+" + c, cv, 1)
-            add("-" + c, -cv, 1)
-
-    # 1bis) mezzi (mezzerie) per tutte le variabili; doppi/tripli SOLO per gli
-    #    spessori (S, E): L*2 o P*3 non hanno senso fisico nel blank.
-    for n in VAR_NAMES:
-        v = vars_dict.get(n)
-        if v is None or abs(v) <= tol:
-            continue
-        add("+" + n + "/2", v / 2.0, 1)
-        add("-" + n + "/2", -v / 2.0, 1)
-        if n in THICKNESS_VARS:
-            add("+" + n + "*2", v * 2.0, 1)
-            add("-" + n + "*2", -v * 2.0, 1)
-            add("+" + n + "*3", v * 3.0, 1)
-            add("-" + n + "*3", -v * 3.0, 1)
-
-    # 2) combinazioni di due variabili (scarto di due pannelli)
-    for i in range(len(VAR_NAMES)):
-        a = vars_dict.get(VAR_NAMES[i])
-        if a is None or abs(a) <= tol:
-            continue
-        na = VAR_NAMES[i]
-        for j in range(i, len(VAR_NAMES)):
-            b = vars_dict.get(VAR_NAMES[j])
-            if b is None or abs(b) <= tol:
-                continue
-            nb = VAR_NAMES[j]
-            add("+%s+%s" % (na, nb), a + b, 2)
-            add("+%s-%s" % (na, nb), a - b, 2)
-            add("-%s+%s" % (na, nb), -a + b, 2)
-            add("-%s-%s" % (na, nb), -a - b, 2)
-
-    return out
-
-
-def suggest_formulas(target, vars_dict, tol, source_exprs=None, max_results=15):
-    """Reverse lookup parametrico.
-
-    Priorita' dei candidati:
-      prio 0 -> COSTRUTTIVO: vicino reale +/- lo scarto geometrico reale
-                (il punto come somma cumulativa di pannelli); piu' l'ancora
-                "piu' lontano da 0" e i suoi riferimenti in sottrazione
-                (Punto 2 v4.2). Tutto derivato da formule REALI del documento;
-      prio 1 -> vicini geometrici e pool imparato dal documento (REALI);
-      prio 2 -> fallback combinatorio (INVENTATO, ultima risorsa).
-    L'ordinamento finale e' (prio, delta, lunghezza), cosi' i candidati
-    costruttivi reali precedono sempre quelli fabbricati. Filtro duplicati
-    sulla FORMA CANONICA.
-    """
-    canon_seen = set()
-    matches = []  # (display_expr, val, delta, status, prio)
-
-    # CASO SPECIALE: target == 0 -> unico suggerimento sensato e' "0".
-    if abs(target) <= tol:
-        return [("0", 0.0, 0.0, "ok")]
-
-    # Retrocompatibilita': accetta singola stringa o lista
-    if source_exprs is None:
-        source_list = []
-    elif isinstance(source_exprs, str):
-        source_list = [source_exprs] if source_exprs else []
-    else:
-        source_list = [s for s in source_exprs if s]
-
-    # Soglia "ok" robusta (Punto 1 v4.2): assoluta + relativa minima.
-    ok_tol = tol + REL_EPS * abs(target)
-
-    # Variabili "morte": valore ~0 (es. T non usata). Un termine che le contiene
-    # non sposta il valore (es. +T con T=0) ma sfuggirebbe al filtro canonico,
-    # comparendo come suggerimento-rumore. Le si scarta in modo DINAMICO: se la
-    # variabile diventa != 0 torna subito utilizzabile. I nomi sono lettere
-    # singole, quindi il test di appartenenza nella forma canonica e' sicuro.
-    dead_vars = set(n for n in VAR_NAMES
-                    if vars_dict.get(n) is None or abs(vars_dict.get(n, 0.0)) <= ok_tol)
-
-    def display_rank(s):
-        # Preferenza di scrittura: meno termini, poi piu' corta.
-        return (len(split_top_level_terms(s)), len(s))
-
-    canon_index = {}  # chiave canonica -> indice in matches
-
-    def try_candidate(expr_str, prio, rank2=10 ** 6):
-        expr_str = expr_str.strip()
-        if not expr_str:
-            return
-        canon = canonical_form(expr_str)
-        if canon == "0":
-            return
-        for dv in dead_vars:                 # scarta termini con variabili morte
-            if dv in canon:
-                return
-        display_expr = simplify_display(expr_str)
-        if canon in canon_seen:
-            # Stessa formula in altra veste: adotta la scrittura piu' pulita
-            # E il rango migliore -- la stessa formula puo' arrivare prima per
-            # una via tortuosa (rango alto) e poi per quella diretta.
-            idx = canon_index.get(canon)
-            if idx is not None:
-                old = matches[idx]
-                new_disp = old[0]
-                if display_rank(display_expr) < display_rank(old[0]):
-                    new_disp = display_expr
-                new_prio, new_rank = old[4], old[5]
-                if (prio, rank2) < (old[4], old[5]):
-                    new_prio, new_rank = prio, rank2
-                matches[idx] = (new_disp, old[1], old[2], old[3], new_prio, new_rank)
-            return
-        canon_seen.add(canon)
-        val, err = safe_eval(display_expr, vars_dict)
-        if err is not None or val is None:
-            return
-        delta = abs(val - target)
-        if delta <= ok_tol:
-            canon_index[canon] = len(matches)
-            matches.append((display_expr, val, delta, "ok", prio, rank2))
-
-    # === FASE 0a (COSTRUTTIVO): vicino reale + scarto geometrico reale ===
-    # Per i vicini piu' prossimi calcola lo scarto col target e cerca il
-    # termine che lo copre: 'src +/- termine'. Riproduce il blank come somma
-    # cumulativa di larghezze di pannello -> candidato fisicamente corretto.
-    # Limitato ai primi vicini (collect_source_formulas li ordina per distanza)
-    # sia per pertinenza sia per costo. Il sotto-ordine rank2 = (indice vicino,
-    # complessita' del termine) fa vincere lo SCARTO PIU' SEMPLICE (gap zero o
-    # un pannello singolo) e, a parita', il vicino piu' prossimo. La semplicita'
-    # del termine DOMINA la vicinanza: un vicino allineato ma raggiunto con una
-    # combinazione a due variabili non deve battere un vicino con gap nullo o
-    # a un solo pannello.
-    for ni, src in enumerate(source_list[:8]):
-        v_src, e_src = safe_eval(src, vars_dict)
-        if e_src is not None or v_src is None:
-            continue
-        src_terms = split_top_level_terms(src)
-        gap = target - v_src
-        if abs(gap) <= ok_tol:
-            try_candidate(join_terms(src_terms), 0, ni)        # gap zero: top
-            continue
-        for ti, (term, cplx) in enumerate(expr_for_gap(gap, vars_dict, ok_tol)):
-            try_candidate(join_terms(src_terms + [term]), 0,
-                          (cplx * 16 + ti + 1) * 32 + ni)
-
-    # === FASE 0b (PUNTO 2 v4.2): ANCORA "PIU' LONTANO DA 0" -> SOTTRAZIONE ===
-    # Individua tra le formule reali quella di modulo massimo e genera
-    # esplicitamente i riferimenti in sottrazione (ancora - V, ancora - (L-S)).
-    # Priorita' 0: precedono ogni altro candidato a parita' di delta.
-    farthest = find_farthest_source(source_list, vars_dict)
-    if farthest:
-        f_terms = split_top_level_terms(farthest)
-        try_candidate(join_terms(f_terms), 0)                 # l'ancora stessa
-        for v in VAR_NAMES:                                   # ancora - variabile
-            try_candidate(join_terms(f_terms + ["-" + v]), 0)
-        for c in COMPOUND_TERMS:                              # ancora - composto
-            try_candidate(join_terms(f_terms + ["-" + c]), 0)
-
-    # === FASE 1: vicini/pool reali (priorita' 1) ===
-    for src in source_list:
-        for cand in neighbor_candidates_from(src):
-            try_candidate(cand, 1)
-
-    # === FASE 2: fallback combinatorio INVENTATO (priorita' 2) ===
-    if len(matches) < 5:
-        # Solo variabili VIVE; multipli (X*2) solo per gli spessori S, E:
-        # L*2 o P*3 non corrispondono a nulla di fisico nel blank.
-        var_items = [(n, v) for (n, v) in vars_dict.items()
-                     if v is not None and abs(v) > ok_tol]
-        for name, val in var_items:
-            try_candidate(name, 2)
-            try_candidate("%s/2" % name, 2)
-            if name in THICKNESS_VARS:
-                try_candidate("%s*2" % name, 2)
-                try_candidate("%s*3" % name, 2)
-            try_candidate("%s/3" % name, 2)
-            try_candidate("%s/4" % name, 2)
-        for i in range(len(var_items)):
-            for j in range(len(var_items)):
-                if i == j:
-                    continue
-                n1, _ = var_items[i]
-                n2, _ = var_items[j]
-                try_candidate("%s+%s" % (n1, n2), 2)
-                try_candidate("%s-%s" % (n1, n2), 2)
-                if n1 in THICKNESS_VARS:
-                    try_candidate("%s*2+%s" % (n1, n2), 2)
-                    try_candidate("%s*2-%s" % (n1, n2), 2)
-                try_candidate("(%s-%s)/2" % (n1, n2), 2)
-                try_candidate("(%s+%s)/2" % (n1, n2), 2)
-                if n2 in THICKNESS_VARS:
-                    try_candidate("%s-%s*2" % (n1, n2), 2)
-                    try_candidate("%s+%s*2" % (n1, n2), 2)
-        for pat in ("L+P+S","L+P-S","L-S*2","P-S*2","(L-S*2)/2","(P-S*2)/2",
-                    "A+P+S","A+P-S","A-S*2","A+T","A+T-S","A+T+S",
-                    "L+C","L-C","P+E","P-E"):
-            try_candidate(pat, 2)
-
-    # Ordina per (priorita', sotto-ordine rank2, delta arrotondato, lunghezza).
-    # rank2 fa emergere, fra i costruttivi, il vicino piu' prossimo con lo
-    # scarto piu' semplice; per gli altri (default alto) decide delta/lunghezza.
-    matches.sort(key=lambda t: (t[4], t[5], round(t[2], 9), len(t[0])))
-    return [(e, v, d, s) for (e, v, d, s, p, r) in matches[:max_results]]
-
-
-# -----------------------------------------------------------------------------
-def show_suggest_dialog(target_x, target_y, vars_dict, tol,
-                        sources_x=None, sources_y=None,
-                        source_ex=None, source_ey=None):
-    """Dialog 'Suggerisci'."""
-    src_x_list = []
-    src_y_list = []
-    if sources_x:
-        src_x_list.extend([s for s in sources_x if s])
-    if sources_y:
-        src_y_list.extend([s for s in sources_y if s])
-    if source_ex and source_ex not in src_x_list:
-        src_x_list.append(source_ex)
-    if source_ey and source_ey not in src_y_list:
-        src_y_list.append(source_ey)
-
-    matches_x = suggest_formulas(target_x, vars_dict, tol, source_exprs=src_x_list)
-    matches_y = suggest_formulas(target_y, vars_dict, tol, source_exprs=src_y_list)
-
-    form = WinForms.Form()
-    form.Text = "Suggerisci formula - reverse lookup (vicino geometrico)"
-    form.Width = 720
-    form.Height = 480
-    form.StartPosition = WinForms.FormStartPosition.CenterScreen
-    form.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
-    form.MaximizeBox = False
-    form.BackColor = Drawing.Color.FromArgb(245, 245, 245)
-
-    fmt = "%." + str(DECIMALS) + "f"
-
-    lbl_info = WinForms.Label()
-    lbl_info.Text = ("Coordinate reali:  X = " + (fmt % target_x) +
-                     "    Y = " + (fmt % target_y) +
-                     "    (tol = " + (fmt % tol) + ")")
-    lbl_info.Font = Drawing.Font("Consolas", 10, Drawing.FontStyle.Bold)
-    lbl_info.ForeColor = COLOR_POINTS
-    lbl_info.Location = Drawing.Point(14, 12)
-    lbl_info.Size = Drawing.Size(680, 22)
-    form.Controls.Add(lbl_info)
-
-    def fmt_src(lst, max_show=3):
-        if not lst:
-            return "-"
-        if len(lst) <= max_show:
-            return ", ".join(lst)
-        return ", ".join(lst[:max_show]) + " (+%d)" % (len(lst) - max_show)
-
-    src_info = "Sorgenti X: %s   |   Sorgenti Y: %s" % (
-        fmt_src(src_x_list), fmt_src(src_y_list))
-    if not src_x_list and not src_y_list:
-        src_info = "Nessuna sorgente disponibile (fallback combinatorio)"
-
-    lbl_src = WinForms.Label()
-    lbl_src.Text = src_info
-    lbl_src.Font = Drawing.Font("Consolas", 8)
-    lbl_src.ForeColor = COLOR_NEUTRAL
-    lbl_src.Location = Drawing.Point(14, 34)
-    lbl_src.Size = Drawing.Size(680, 16)
-    form.Controls.Add(lbl_src)
-
-    lbl_x = WinForms.Label()
-    lbl_x.Text = "Candidati per X:"
-    lbl_x.Font = Drawing.Font("Segoe UI", 9, Drawing.FontStyle.Bold)
-    lbl_x.Location = Drawing.Point(14, 54)
-    lbl_x.Size = Drawing.Size(340, 20)
-    form.Controls.Add(lbl_x)
-
-    lst_x = WinForms.ListBox()
-    lst_x.Font = Drawing.Font("Consolas", 9)
-    lst_x.Location = Drawing.Point(14, 76)
-    lst_x.Size = Drawing.Size(340, 310)
-    if not matches_x:
-        lst_x.Items.Add("(nessun match trovato)")
-    for expr, val, delta, status in matches_x:
-        lst_x.Items.Add("%-30s = %10s" % (expr, fmt % val))
-    form.Controls.Add(lst_x)
-
-    lbl_y = WinForms.Label()
-    lbl_y.Text = "Candidati per Y:"
-    lbl_y.Font = Drawing.Font("Segoe UI", 9, Drawing.FontStyle.Bold)
-    lbl_y.Location = Drawing.Point(366, 54)
-    lbl_y.Size = Drawing.Size(340, 20)
-    form.Controls.Add(lbl_y)
-
-    lst_y = WinForms.ListBox()
-    lst_y.Font = Drawing.Font("Consolas", 9)
-    lst_y.Location = Drawing.Point(366, 76)
-    lst_y.Size = Drawing.Size(340, 310)
-    if not matches_y:
-        lst_y.Items.Add("(nessun match trovato)")
-    for expr, val, delta, status in matches_y:
-        lst_y.Items.Add("%-30s = %10s" % (expr, fmt % val))
-    form.Controls.Add(lst_y)
-
-    btn_use = WinForms.Button()
-    btn_use.Text = "Usa selezione"
-    btn_use.Font = Drawing.Font("Segoe UI", 9, Drawing.FontStyle.Bold)
-    btn_use.BackColor = Drawing.Color.FromArgb(0, 100, 200)
-    btn_use.ForeColor = Drawing.Color.White
-    btn_use.FlatStyle = WinForms.FlatStyle.Flat
-    btn_use.Location = Drawing.Point(500, 400)
-    btn_use.Size = Drawing.Size(110, 28)
-    btn_use.DialogResult = WinForms.DialogResult.OK
-    form.Controls.Add(btn_use)
-    form.AcceptButton = btn_use
-
-    btn_close = WinForms.Button()
-    btn_close.Text = "Chiudi"
-    btn_close.Font = Drawing.Font("Segoe UI", 9)
-    btn_close.Location = Drawing.Point(615, 400)
-    btn_close.Size = Drawing.Size(90, 28)
-    btn_close.DialogResult = WinForms.DialogResult.Cancel
-    form.Controls.Add(btn_close)
-    form.CancelButton = btn_close
-
-    result = form.ShowDialog()
-    if result != WinForms.DialogResult.OK:
-        return None, None
-
-    sel_x = ""
-    sel_y = ""
-    if lst_x.SelectedIndex >= 0 and matches_x:
-        if lst_x.SelectedIndex < len(matches_x):
-            sel_x = matches_x[lst_x.SelectedIndex][0]
-    if lst_y.SelectedIndex >= 0 and matches_y:
-        if lst_y.SelectedIndex < len(matches_y):
-            sel_y = matches_y[lst_y.SelectedIndex][0]
-    return sel_x, sel_y
-
-
 # -----------------------------------------------------------------------------
 def show_param_dialog(x, y, vars_dict, tol,
-                      source_ex=None, source_ey=None,
-                      sources_x=None, sources_y=None,
                       preset_ex="", preset_ey="", preset_note=""):
-    """Dialogo di annotazione con validazione live."""
+    """Dialogo di annotazione con validazione live.
+    Ritorna (action, expr_x, expr_y, note, sx, sy):
+      action = 'ok' | 'skip' | 'cancel' | 'pick_x' | 'pick_y'
+    Per 'pick_x'/'pick_y' i tre testi correnti (X, Y, Nota) vengono
+    restituiti cosi' come sono: il chiamante fa selezionare le quote in
+    contesto Rhino (il dialogo DEVE essere chiuso: un modale, anche
+    nascosto, disabilita la finestra di Rhino) e riapre il dialogo con i
+    campi conservati e la formula prelevata accodata."""
     fmt = "%." + str(DECIMALS) + "f"
 
     form = WinForms.Form()
@@ -1232,23 +753,33 @@ def show_param_dialog(x, y, vars_dict, tol,
     if preset_ey:
         update_feedback(txt_y, lbl_y_feedback, y, "sy")
 
-    btn_suggest = WinForms.Button()
-    btn_suggest.Text = "Suggerisci..."
-    btn_suggest.Font = Drawing.Font("Segoe UI", 9)
-    btn_suggest.Location = Drawing.Point(14, 308)
-    btn_suggest.Size = Drawing.Size(110, 28)
-    form.Controls.Add(btn_suggest)
+    # === Preleva da quote (v4.5): chiude il dialogo, il chiamante fa
+    #     selezionare le quote e riapre col campo arricchito ===
+    pick = {"action": None}
 
-    def on_suggest(sender, e):
-        sx, sy = show_suggest_dialog(x, y, vars_dict, tol,
-                                     sources_x=sources_x, sources_y=sources_y,
-                                     source_ex=source_ex, source_ey=source_ey)
-        if sx is not None and sx:
-            txt_x.Text = sx
-        if sy is not None and sy:
-            txt_y.Text = sy
+    btn_pick_x = WinForms.Button()
+    btn_pick_x.Text = "Preleva -> X"
+    btn_pick_x.Font = Drawing.Font("Segoe UI", 8)
+    btn_pick_x.Location = Drawing.Point(14, 308)
+    btn_pick_x.Size = Drawing.Size(92, 28)
+    form.Controls.Add(btn_pick_x)
 
-    btn_suggest.Click += on_suggest
+    btn_pick_y = WinForms.Button()
+    btn_pick_y.Text = "Preleva -> Y"
+    btn_pick_y.Font = Drawing.Font("Segoe UI", 8)
+    btn_pick_y.Location = Drawing.Point(112, 308)
+    btn_pick_y.Size = Drawing.Size(92, 28)
+    form.Controls.Add(btn_pick_y)
+
+    def on_pick_x(sender, e):
+        pick["action"] = "pick_x"
+        form.Close()
+    btn_pick_x.Click += on_pick_x
+
+    def on_pick_y(sender, e):
+        pick["action"] = "pick_y"
+        form.Close()
+    btn_pick_y.Click += on_pick_y
 
     btn_ok = WinForms.Button()
     btn_ok.Text = "Conferma"
@@ -1256,7 +787,7 @@ def show_param_dialog(x, y, vars_dict, tol,
     btn_ok.BackColor = Drawing.Color.FromArgb(0, 100, 200)
     btn_ok.ForeColor = Drawing.Color.White
     btn_ok.FlatStyle = WinForms.FlatStyle.Flat
-    btn_ok.Location = Drawing.Point(330, 308)
+    btn_ok.Location = Drawing.Point(214, 308)
     btn_ok.Size = Drawing.Size(100, 28)
     btn_ok.DialogResult = WinForms.DialogResult.OK
     form.Controls.Add(btn_ok)
@@ -1265,7 +796,7 @@ def show_param_dialog(x, y, vars_dict, tol,
     btn_skip = WinForms.Button()
     btn_skip.Text = "Salta"
     btn_skip.Font = Drawing.Font("Segoe UI", 9)
-    btn_skip.Location = Drawing.Point(440, 308)
+    btn_skip.Location = Drawing.Point(324, 308)
     btn_skip.Size = Drawing.Size(70, 28)
     btn_skip.DialogResult = WinForms.DialogResult.Ignore
     form.Controls.Add(btn_skip)
@@ -1274,7 +805,7 @@ def show_param_dialog(x, y, vars_dict, tol,
     btn_cancel.Text = "Annulla tutto"
     btn_cancel.Font = Drawing.Font("Segoe UI", 9)
     btn_cancel.ForeColor = Drawing.Color.FromArgb(180, 30, 30)
-    btn_cancel.Location = Drawing.Point(520, 308)
+    btn_cancel.Location = Drawing.Point(404, 308)
     btn_cancel.Size = Drawing.Size(78, 28)
     btn_cancel.DialogResult = WinForms.DialogResult.Cancel
     form.Controls.Add(btn_cancel)
@@ -1286,49 +817,106 @@ def show_param_dialog(x, y, vars_dict, tol,
 
     result = form.ShowDialog()
 
+    cur = (txt_x.Text.strip(), txt_y.Text.strip(), txt_note.Text.strip(),
+           state["sx"], state["sy"])
+
+    if pick["action"] in ("pick_x", "pick_y"):
+        return (pick["action"],) + cur
     if result == WinForms.DialogResult.OK:
-        return (txt_x.Text.strip(), txt_y.Text.strip(),
-                txt_note.Text.strip(), state["sx"], state["sy"])
+        return ("ok",) + cur
     elif result == WinForms.DialogResult.Ignore:
-        return "", "", "", "empty", "empty"
+        return ("skip", "", "", "", "empty", "empty")
     else:
-        return None, None, None, None, None
+        return ("cancel", None, None, None, None, None)
 
 
 # -----------------------------------------------------------------------------
-def build_dot_text(x, y, ex, ey, note, status_x, status_y):
-    fmt = "%." + str(DECIMALS) + "f"
-    lines = []
-    if note:
-        lines.append("[ " + note + " ]")
-    mark_x = ""
-    if status_x == "ok":       mark_x = " OK"
-    elif status_x == "approx": mark_x = " ~"
-    elif status_x == "err":    mark_x = " !"
-    mark_y = ""
-    if status_y == "ok":       mark_y = " OK"
-    elif status_y == "approx": mark_y = " ~"
-    elif status_y == "err":    mark_y = " !"
+#  COMPLETEZZA -> COLORE DEL PUNTO (v4.4, sostituisce i TextDot)
+# -----------------------------------------------------------------------------
+def point_completeness_color(sx, sy):
+    """Grigio se X e Y sono entrambi compilati e validi, giallo altrimenti."""
+    x_complete = sx in ("ok", "approx")
+    y_complete = sy in ("ok", "approx")
+    if x_complete and y_complete:
+        return COLOR_PT_COMPLETE
+    return COLOR_PT_INCOMPLETE
 
-    lines.append("X = " + (fmt % x) + mark_x)
-    if ex:
-        lines.append("    ( " + ex + " )")
-    lines.append("Y = " + (fmt % y) + mark_y)
-    if ey:
-        lines.append("    ( " + ey + " )")
-    return "\n".join(lines)
+
+def cleanup_legacy_dots():
+    """Conta i TextDot delle versioni precedenti (Name 'PKG_DOT_...') e, su
+    conferma, li rimuove in blocco. Il filtro sul prefisso del nome evita di
+    toccare quote o altri oggetti sul layer. Ritorna il numero rimosso."""
+    legacy = []
+    for obj in sc.doc.Objects:
+        if obj.IsDeleted:
+            continue
+        if not isinstance(obj.Geometry, Rhino.Geometry.TextDot):
+            continue
+        name = obj.Attributes.Name or ""
+        if name.startswith("PKG_DOT_"):
+            legacy.append(obj.Id)
+    if not legacy:
+        return 0
+    r = WinForms.MessageBox.Show(
+        ("Trovati %d TextDot legacy (note dei punti).\n"
+         "Dalla v4.4 le note non vengono piu' create: la completezza\n"
+         "e' indicata dal COLORE del punto (grigio = completo,\n"
+         "giallo = incompleto).\n\n"
+         "Rimuovere ora tutti i TextDot legacy?") % len(legacy),
+        "PKG Annotator - pulizia note",
+        WinForms.MessageBoxButtons.YesNo,
+        WinForms.MessageBoxIcon.Question)
+    if r != WinForms.DialogResult.Yes:
+        return 0
+    n = 0
+    for gid in legacy:
+        if sc.doc.Objects.Delete(gid, True):
+            n += 1
+    sc.doc.Views.Redraw()
+    print "PKG Annotator: rimossi %d TextDot legacy." % n
+    return n
+
+
+def recolor_points_by_completeness(idx_pts):
+    """Ricolora i punti annotati esistenti in base a X_status/Y_status, cosi'
+    anche i file delle versioni precedenti adottano subito la convenzione
+    grigio/giallo. I punti senza alcuno status (mai annotati) non vengono
+    toccati. Ritorna il numero di punti ricolorati."""
+    if idx_pts < 0:
+        return 0
+    n = 0
+    for obj in sc.doc.Objects:
+        if obj.IsDeleted or obj.Attributes.LayerIndex != idx_pts:
+            continue
+        if not isinstance(obj.Geometry, Rhino.Geometry.Point):
+            continue
+        sx = obj.Attributes.GetUserString("X_status")
+        sy = obj.Attributes.GetUserString("Y_status")
+        if not sx and not sy:
+            continue                  # punto mai finalizzato: lascia stare
+        color = point_completeness_color(sx or "", sy or "")
+        attr = obj.Attributes.Duplicate()
+        if (attr.ColorSource == Rhino.DocObjects.ObjectColorSource.ColorFromObject
+                and attr.ObjectColor == color):
+            continue                  # gia' a posto
+        attr.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
+        attr.ObjectColor = color
+        if sc.doc.Objects.ModifyAttributes(obj, attr, True):
+            n += 1
+    if n > 0:
+        sc.doc.Views.Redraw()
+        print "PKG Annotator: ricolorati %d punto/i (grigio/giallo)." % n
+    return n
 
 
 # -----------------------------------------------------------------------------
 #  SOVRASCRITTURA - basata sulla chiave geometrica
 # -----------------------------------------------------------------------------
-def find_existing_by_key(point_key, dot_key, tol):
-    """Cerca punto e textdot esistenti con la chiave geometrica data."""
+def find_existing_by_key(point_key, tol):
+    """Cerca il punto esistente con la chiave geometrica data."""
     idx_pts  = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
-    idx_dots = sc.doc.Layers.FindByFullPath(LAYER_DOTS,   -1)
 
     found_pt = None
-    found_dot = None
     preset = {"X_param": "", "Y_param": "", "Nota": ""}
 
     m = re.match(r"^PKG_X([+-])(\d+)_Y([+-])(\d+)$", point_key)
@@ -1362,251 +950,17 @@ def find_existing_by_key(point_key, dot_key, tol):
                 if preset["X_param"] == "--": preset["X_param"] = ""
                 if preset["Y_param"] == "--": preset["Y_param"] = ""
 
-        elif layer_idx == idx_dots and isinstance(obj.Geometry, Rhino.Geometry.TextDot):
-            hit = False
-            if name == dot_key:
-                hit = True
-            elif kx is not None:
-                p = obj.Geometry.Point
-                expected_x = kx + DOT_OFFSET_X
-                expected_y = ky + DOT_OFFSET_Y
-                if abs(p.X - expected_x) <= tol_match and abs(p.Y - expected_y) <= tol_match:
-                    hit = True
-            if hit and found_dot is None:
-                found_dot = obj
 
-    return found_pt, found_dot, preset
+    return found_pt, preset
 
 
-def delete_existing(point_obj, dot_obj):
-    """Cancella un Point e un TextDot precedentemente trovati."""
+def delete_existing(point_obj):
+    """Cancella un Point precedentemente trovato."""
     n = 0
     if point_obj is not None:
         if sc.doc.Objects.Delete(point_obj.Id, True):
             n += 1
-    if dot_obj is not None:
-        if sc.doc.Objects.Delete(dot_obj.Id, True):
-            n += 1
     return n
-
-
-# -----------------------------------------------------------------------------
-#  SPECCHIA CURVE TAGGATE (Punto 3 v4.2)
-# -----------------------------------------------------------------------------
-def _object_userstrings(obj):
-    """Lista [(key, value), ...] di tutte le UserString dell'oggetto."""
-    out = []
-    try:
-        coll = obj.Attributes.GetUserStrings()
-    except Exception:
-        coll = None
-    if coll is not None:
-        try:
-            keys = list(coll.AllKeys)
-        except Exception:
-            keys = []
-        for k in keys:
-            if k is None:
-                continue
-            v = coll.Get(k)
-            if v:
-                out.append((k, v))
-    return out
-
-
-def _is_cyan(obj):
-    """True se il colore di visualizzazione dell'oggetto e' ciano (0,255,255),
-    con tolleranza (R basso, G e B alti). Risolve anche il colore ByLayer."""
-    c = None
-    try:
-        c = obj.Attributes.DrawColor(sc.doc)
-    except Exception:
-        try:
-            c = obj.Attributes.ObjectColor
-        except Exception:
-            return False
-    if c is None:
-        return False
-    return (c.R <= 80) and (c.G >= 160) and (c.B >= 160)
-
-
-def mirror_transform_for_curve(crv):
-    """Costruisce il Transform di mirror rispetto alla retta definita dalla
-    curva 'crv' (usa start/end). Il piano di mirror contiene la linea e l'asse
-    Z del mondo (lavoro 2D in XY: il riflesso e' sul lato opposto della linea).
-    Ritorna None se la linea e' degenere o verticale rispetto a Z."""
-    p0 = crv.PointAtStart
-    p1 = crv.PointAtEnd
-    d = p1 - p0
-    if d.Length < 1e-9:
-        return None
-    if not d.Unitize():
-        return None
-    up = Rhino.Geometry.Vector3d.ZAxis
-    normal = Rhino.Geometry.Vector3d.CrossProduct(d, up)
-    if normal.Length < 1e-9:
-        return None
-    if not normal.Unitize():
-        return None
-    return Rhino.Geometry.Transform.Mirror(p0, normal)
-
-
-def mirror_tagged_curves(tol):
-    """Specchia gruppi di curve lungo le rispettive linee di proiezione.
-
-      - CURVE da specchiare: UserString con CHIAVE (o valore, o Nome) "Proietta
-        su X" -- nella convenzione d'uso il tag e' nella CHIAVE con valore vuoto.
-      - LINEA di proiezione: colore CIANO, con CHIAVE (o valore, o Nome) "X".
-
-    Ogni curva "Proietta su X" e' specchiata sulla linea cyan "X". Il duplicato
-    eredita gli attributi (layer, ecc.); il tag "Proietta su X" viene RIMOSSO e
-    sostituito da "Specchiato da X" per evitare un nuovo mirror successivo.
-
-    Robustezza (v4.2): l'asse e' accettato solo se la sua etichetta coincide
-    ESATTAMENTE con una realmente referenziata da una "Proietta su X". Cosi' le
-    chiavi di pipeline (Status, Comando, P1_id, ...) non vengono mai scambiate
-    per assi. Il mirror e' una riflessione 2D rispetto alla retta della linea
-    cyan: vale per QUALSIASI orientamento (orizzontale, verticale, obliquo).
-    """
-    # Chiavi del pipeline da NON confondere con un'etichetta d'asse.
-    reserved = set([
-        "X_REALE", "Y_REALE", "X_PARAM", "Y_PARAM", "X_STATUS", "Y_STATUS",
-        "P1_ID", "P2_ID", "P1_PARAM", "P2_PARAM", "STATUS", "COMANDO",
-        "LUNGHEZZA", "TIPO_ORIGINALE", "SEQID", "NOME", "LAYER",
-    ])
-
-    axes = {}              # LABEL -> curve_geo (linea di proiezione cyan)
-    axis_seen_twice = set()
-    to_mirror = []         # (obj, geo, LABEL, src_key)
-    cyan_curves = []       # (obj, geo, us, name) da risolvere dopo
-    valid_labels = set()   # etichette REALMENTE referenziate da "Proietta su X"
-
-    def _find_proietta(us, name):
-        """Cerca 'Proietta su X' tra CHIAVI e VALORI delle UserString e nel
-        Nome. Ritorna (LABEL_upper, storage_key) oppure (None, None)."""
-        for k, v in us:
-            for field in (k, v):
-                if not field:
-                    continue
-                m = _PROIETTA_RE.match(field.strip())
-                if m:
-                    return m.group(1).strip().upper(), k
-        if name:
-            m = _PROIETTA_RE.match(name.strip())
-            if m:
-                return m.group(1).strip().upper(), "__name__"
-        return None, None
-
-    for obj in sc.doc.Objects:
-        if obj.IsDeleted:
-            continue
-        geo = obj.Geometry
-        if not isinstance(geo, Rhino.Geometry.Curve):
-            continue
-
-        us = _object_userstrings(obj)
-        name = obj.Attributes.Name or ""
-
-        # 1) Curva da specchiare? "Proietta su X" su chiave/valore/Nome.
-        proj_label, proj_key = _find_proietta(us, name)
-        if proj_label:
-            to_mirror.append((obj, geo, proj_label, proj_key))
-            valid_labels.add(proj_label)
-            continue  # una "Proietta su" non e' anche un asse
-
-        # 2) Possibile asse cyan: risolto dopo, contro valid_labels.
-        if _is_cyan(obj):
-            cyan_curves.append((obj, geo, us, name))
-
-    # --- risoluzione assi: solo linee cyan la cui CHIAVE/valore/Nome coincide
-    #     ESATTAMENTE con un'etichetta referenziata. ---
-    for obj, geo, us, name in cyan_curves:
-        lab = None
-        for k, v in us:
-            for field in (k, v):
-                if not field:
-                    continue
-                f = field.strip().upper()
-                if f and f not in reserved and f in valid_labels:
-                    lab = f
-                    break
-            if lab:
-                break
-        if lab is None and name and name.strip().upper() in valid_labels:
-            lab = name.strip().upper()
-        if lab:
-            if lab in axes:
-                axis_seen_twice.add(lab)
-            else:
-                axes[lab] = geo
-
-    # --- nessuna curva taggata: avvisa e termina ---
-    if not to_mirror:
-        WinForms.MessageBox.Show(
-            "Nessuna curva con tag 'Proietta su <etichetta>' trovata.\n\n"
-            "Assegna alle curve da specchiare una UserString con CHIAVE\n"
-            "'Proietta su A' (o B, C...) e disegna la linea di proiezione in\n"
-            "colore CIANO con UserString di CHIAVE 'A' (o B, C...).",
-            "Specchia curve taggate",
-            WinForms.MessageBoxButtons.OK,
-            WinForms.MessageBoxIcon.Information)
-        return
-
-    # --- applica il mirror ---
-    created = 0
-    new_ids = []
-    unmatched = []
-
-    for obj, geo, label, src_key in to_mirror:
-        if label not in axes:
-            unmatched.append(label)
-            continue
-        xform = mirror_transform_for_curve(axes[label])
-        if xform is None:
-            unmatched.append(label)
-            continue
-        dup = geo.DuplicateCurve()
-        if dup is None:
-            continue
-        if not dup.Transform(xform):
-            continue
-        attr = obj.Attributes.Duplicate()   # Duplicate() richiesto da RhinoCommon
-        if src_key == "__name__":
-            attr.Name = ""
-        elif src_key is not None:
-            # Con il tag sulla CHIAVE, cambiarne il valore non basta: la chiave
-            # 'Proietta su X' continuerebbe a combaciare e la curva verrebbe
-            # ri-specchiata. La si RIMUOVE: passare None a SetUserString cancella
-            # la UserString in RhinoCommon.
-            attr.SetUserString(src_key, None)
-        # Marcatore anti ri-mirror con valore NON vuoto (un valore vuoto sarebbe
-        # rimosso da RhinoCommon).
-        attr.SetUserString("Specchiato da %s" % label, "si")
-        new_id = sc.doc.Objects.AddCurve(dup, attr)
-        if new_id != System.Guid.Empty:
-            created += 1
-            new_ids.append(new_id)
-
-    if new_ids:
-        sc.doc.Objects.UnselectAll()
-        for nid in new_ids:
-            sc.doc.Objects.Select(nid)
-    sc.doc.Views.Redraw()
-
-    # --- report ---
-    msg = "Specchiate %d curva/e su %d totali." % (created, len(to_mirror))
-    if unmatched:
-        uniq = sorted(set(unmatched))
-        msg += ("\n\nEtichette senza linea di proiezione cyan corrispondente:\n  "
-                + ", ".join(uniq))
-    if axis_seen_twice:
-        msg += ("\n\nEtichette con piu' di una linea cyan (usata la prima):\n  "
-                + ", ".join(sorted(axis_seen_twice)))
-    print "PKG Annotator v4.2 - mirror: %d/%d curve specchiate." % (
-        created, len(to_mirror))
-    WinForms.MessageBox.Show(msg, "Specchia curve taggate",
-                             WinForms.MessageBoxButtons.OK,
-                             WinForms.MessageBoxIcon.Information)
 
 
 # =============================================================================
@@ -1881,7 +1235,7 @@ def propagate_quotes(constraints, vars_dict, tol):
     return nodes, n_verified, bad
 
 
-def apply_quote_points(nodes, vars_dict, tol, idx_pts, idx_dots):
+def apply_quote_points(nodes, vars_dict, tol, idx_pts):
     """Crea i punti annotati derivati dalle quote. SOLO i punti COMPLETI
     (X_param e Y_param entrambe note): un punto mezzo vuoto non e' conosciuto
     parametricamente e non va inserito. Non tocca i punti gia' esistenti
@@ -1911,20 +1265,8 @@ def apply_quote_points(nodes, vars_dict, tol, idx_pts, idx_dots):
             continue
         pt = Point3d(x, y, 0.0)
         point_key = make_point_key(x, y)
-        dot_key = make_dot_key(x, y)
         prov = create_provisional_point(pt, point_key, idx_pts)
         finalize_point(prov, point_key, x, y, ex, ey, "ok", "ok", "da quota")
-        dot_text = build_dot_text(x, y, ex, ey, "da quota", "ok", "ok")
-        pt_dot = Point3d(x + DOT_OFFSET_X, y + DOT_OFFSET_Y, 0.0)
-        td = TextDot(dot_text, pt_dot)
-        td.FontHeight = DOT_HEIGHT
-        td.FontFace = DOT_FONT
-        attr_dot = Rhino.DocObjects.ObjectAttributes()
-        attr_dot.LayerIndex = idx_dots
-        attr_dot.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
-        attr_dot.ObjectColor = COLOR_DOT_COMPLETE
-        attr_dot.Name = dot_key
-        sc.doc.Objects.AddTextDot(td, attr_dot)
         created += 1
     return created, skipped, incomplete
 
@@ -2039,7 +1381,7 @@ def show_help_dialog():
     """Avvio SENZA selezione: mostra l'help. Ritorna True per continuare con
     la sessione classica punto-per-punto, False per uscire."""
     msg = (
-        "PKG ANNOTATOR v4.3 - guida rapida\n\n"
+        "PKG ANNOTATOR v" + VERSION + " - guida rapida\n\n"
         "AVVIO CON SELEZIONE (consigliato):\n"
         "  Seleziona le QUOTE-funzione (e le geometrie) PRIMA di avviare.\n"
         "  - Quota con testo = nome variabile (L, P, A, S, C, T, E):\n"
@@ -2055,9 +1397,17 @@ def show_help_dialog():
         "  verifica; se corrisponde a dX e/o dY (es. 'E' sul bisellino a 45\n"
         "  gradi, dove dX = dY = E) -> propaga su quegli assi.\n\n"
         "AVVIO SENZA SELEZIONE: questa guida, poi (se Continua) la sessione\n"
-        "classica: clic su un punto, suggerimento di X_param/Y_param dai\n"
-        "vicini annotati, conferma, TextDot quotato. Opzioni nel prompt:\n"
-        "SpecchiaCurve (mirror su linee cyan taggate), Invio per terminare.\n\n"
+        "classica: clic su un punto; se cade su un nodo-quota ancorato o e'\n"
+        "allineato a un punto gia' 'ok', X/Y vengono PRECOMPILATE (da\n"
+        "verificare e confermare). La completezza e' indicata dal COLORE\n"
+        "del punto: GRIGIO = completo, GIALLO = incompleto (niente piu'\n"
+        "note TextDot; quelle legacy vengono rimosse su conferma).\n"
+        "Formule: min/max ammessi, es. min(L/2, (T+(P+S))/2).\n"
+        "Nel dialogo, 'Preleva -> X' / 'Preleva -> Y' (v4.5): seleziona\n"
+        "quote-funzione e/o punti gia' annotati; ne accoda la formula nel\n"
+        "campo (dalle quote il testo, dai punti X_param o Y_param secondo\n"
+        "l'asse). Il dialogo si chiude per la selezione e riapre da solo.\n"
+        "Invio per terminare.\n\n"
         "Continuare con la sessione punto-per-punto?")
     r = WinForms.MessageBox.Show(msg, "PKG Annotator - help",
                                  WinForms.MessageBoxButtons.YesNo,
@@ -2071,7 +1421,7 @@ def show_summary_dialog(records):
         return
 
     form = WinForms.Form()
-    form.Text = "Riepilogo sessione - PKG Annotator v4.2"
+    form.Text = "Riepilogo sessione - PKG Annotator v" + VERSION
     form.Width = 780
     form.Height = 480
     form.StartPosition = WinForms.FormStartPosition.CenterScreen
@@ -2170,24 +1520,30 @@ def rollback_provisional_point(pt_guid):
 
 
 def finalize_point(pt_guid, point_key, x, y, expr_x, expr_y, sx, sy, note):
-    """Aggiorna gli UserString del punto provvisorio, rendendolo definitivo."""
+    """Aggiorna gli UserString del punto provvisorio, rendendolo definitivo.
+    v4.4: imposta anche il COLORE in base alla completezza (grigio = X e Y
+    entrambi validi, giallo = incompleto) e usa Attributes.Duplicate()
+    prima di ModifyAttributes (un riferimento vivo puo' essere ignorato)."""
     fmt = "%." + str(DECIMALS) + "f"
     if pt_guid == System.Guid.Empty:
         return None
     rh_obj = sc.doc.Objects.FindId(pt_guid)
     if not rh_obj:
         return None
-    rh_obj.Attributes.SetUserString("X_reale",  fmt % x)
-    rh_obj.Attributes.SetUserString("Y_reale",  fmt % y)
-    rh_obj.Attributes.SetUserString("X_param",  expr_x if expr_x else "--")
-    rh_obj.Attributes.SetUserString("Y_param",  expr_y if expr_y else "--")
-    rh_obj.Attributes.SetUserString("X_status", sx)
-    rh_obj.Attributes.SetUserString("Y_status", sy)
-    rh_obj.Attributes.SetUserString("Nota",     note if note else "")
-    rh_obj.Attributes.SetUserString("PKG_provvisorio", "")
-    rh_obj.Attributes.Name = point_key
-    sc.doc.Objects.ModifyAttributes(rh_obj, rh_obj.Attributes, True)
-    return rh_obj
+    attr = rh_obj.Attributes.Duplicate()
+    attr.SetUserString("X_reale",  fmt % x)
+    attr.SetUserString("Y_reale",  fmt % y)
+    attr.SetUserString("X_param",  expr_x if expr_x else "--")
+    attr.SetUserString("Y_param",  expr_y if expr_y else "--")
+    attr.SetUserString("X_status", sx)
+    attr.SetUserString("Y_status", sy)
+    attr.SetUserString("Nota",     note if note else "")
+    attr.SetUserString("PKG_provvisorio", "")
+    attr.Name = point_key
+    attr.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
+    attr.ObjectColor = point_completeness_color(sx, sy)
+    sc.doc.Objects.ModifyAttributes(rh_obj, attr, True)
+    return sc.doc.Objects.FindId(pt_guid)
 
 
 # -----------------------------------------------------------------------------
@@ -2241,7 +1597,10 @@ def main():
         tol = 0.001
 
     idx_pts  = get_or_create_layer(LAYER_POINTS, COLOR_POINTS)
-    idx_dots = get_or_create_layer(LAYER_DOTS,   COLOR_DOTS)
+
+    # === MIGRAZIONE v4.4: via i TextDot legacy, colore sui punti ===
+    cleanup_legacy_dots()
+    recolor_points_by_completeness(idx_pts)
 
     # === FASE QUOTE (v4.3): verifica + propagazione + creazione punti ===
     quote_nodes = {}
@@ -2249,7 +1608,7 @@ def main():
         nodes, n_ver, bad = propagate_quotes(quote_constraints, vars_dict, tol)
         quote_nodes = nodes          # restano in memoria per la precompilazione
         created, skipped, incomplete = apply_quote_points(
-            nodes, vars_dict, tol, idx_pts, idx_dots)
+            nodes, vars_dict, tol, idx_pts)
         sc.doc.Views.Redraw()
         show_quote_report(quote_defs, quote_conflicts,
                           len(quote_constraints), n_ver, bad,
@@ -2271,16 +1630,9 @@ def main():
     while True:
         gp = Rhino.Input.Custom.GetPoint()
         gp.SetCommandPrompt(
-            "Punto #%d - calamita Fine/Medio  (Invio=fine, opzione SpecchiaCurve)" % (count + 1))
+            "Punto #%d - calamita Fine/Medio  (Invio=fine)" % (count + 1))
         gp.AcceptNothing(True)
-        idx_opt_mirror = gp.AddOption("SpecchiaCurve")
         res = gp.Get()
-
-        # Opzione "SpecchiaCurve" (Punto 3 v4.2)
-        if res == Rhino.Input.GetResult.Option:
-            if gp.OptionIndex() == idx_opt_mirror:
-                mirror_tagged_curves(tol)
-            continue
 
         # Invio (Nothing) o Esc (Cancel) o altro -> termina la sessione
         if res != Rhino.Input.GetResult.Point:
@@ -2292,25 +1644,18 @@ def main():
 
         # === Chiavi geometriche del nuovo punto ===
         point_key = make_point_key(x, y)
-        dot_key   = make_dot_key(x, y)
 
         # === Sovrascrittura: cerca e cancella eventuali duplicati ===
-        old_pt_obj, old_dot_obj, preset = find_existing_by_key(point_key, dot_key, tol)
+        old_pt_obj, preset = find_existing_by_key(point_key, tol)
         is_overwrite = (old_pt_obj is not None)
         if is_overwrite:
-            n_removed = delete_existing(old_pt_obj, old_dot_obj)
+            n_removed = delete_existing(old_pt_obj)
             print "PKG Annotator: sovrascrittura di %s (rimossi %d oggetto/i)." % (
                 point_key, n_removed)
             sc.doc.Views.Redraw()
 
         # === VISIBILITA' AL CLIC ===
         prov_guid = create_provisional_point(pt, point_key, idx_pts)
-
-        # === Reverse lookup sorgente: pool di vicini geometrici ===
-        sources_x, sources_y = collect_source_formulas(
-            pt, k_neighbors=3, exclude_at_zero_dist=True, tol=tol)
-        source_ex = sources_x[0] if sources_x else None
-        source_ey = sources_y[0] if sources_y else None
 
         # === PRECOMPILAZIONE CERTA (v4.3) ===
         # Se il punto non e' una sovrascrittura (o lo e' solo in parte), i
@@ -2326,16 +1671,33 @@ def main():
             if not pre_ey and cert_ey:
                 pre_ey = cert_ey
 
-        expr_x, expr_y, note, sx, sy = show_param_dialog(
-            x, y, vars_dict, tol,
-            source_ex=source_ex, source_ey=source_ey,
-            sources_x=sources_x, sources_y=sources_y,
-            preset_ex=pre_ex,
-            preset_ey=pre_ey,
-            preset_note=preset["Nota"])
+        # === Dialogo con ciclo "Preleva da quote" (v4.5) ===
+        # 'pick_x'/'pick_y': il dialogo si e' chiuso conservando i campi;
+        # selezione quote in contesto Rhino, accodamento, riapertura.
+        pending_ex   = pre_ex
+        pending_ey   = pre_ey
+        pending_note = preset["Nota"]
+        while True:
+            action, expr_x, expr_y, note, sx, sy = show_param_dialog(
+                x, y, vars_dict, tol,
+                preset_ex=pending_ex,
+                preset_ey=pending_ey,
+                preset_note=pending_note)
+            if action not in ("pick_x", "pick_y"):
+                break
+            pending_ex, pending_ey, pending_note = expr_x, expr_y, note
+            ax = "X" if action == "pick_x" else "Y"
+            target = pending_ex if action == "pick_x" else pending_ey
+            for f_ in pick_formulas(ax, exclude_id=prov_guid):
+                piece = wrap_if_composite(f_)
+                target = piece if not target else (target + "+" + piece)
+            if action == "pick_x":
+                pending_ex = target
+            else:
+                pending_ey = target
 
         # === Gestione esito del dialogo ===
-        if expr_x is None:
+        if action == "cancel" or expr_x is None:
             rollback_provisional_point(prov_guid)
             break
 
@@ -2343,27 +1705,8 @@ def main():
             rollback_provisional_point(prov_guid)
             continue
 
-        # === Finalizza il punto provvisorio ===
+        # === Finalizza il punto provvisorio (v4.4: colore = completezza) ===
         finalize_point(prov_guid, point_key, x, y, expr_x, expr_y, sx, sy, note)
-
-        # === Crea il TextDot, colore in base alla completezza ===
-        dot_text = build_dot_text(x, y, expr_x, expr_y, note, sx, sy)
-        pt_dot   = Point3d(pt.X + DOT_OFFSET_X, pt.Y + DOT_OFFSET_Y, pt.Z)
-        td       = TextDot(dot_text, pt_dot)
-        td.FontHeight = DOT_HEIGHT
-        td.FontFace   = DOT_FONT
-
-        x_complete = sx in ("ok", "approx")
-        y_complete = sy in ("ok", "approx")
-        dot_color = COLOR_DOT_COMPLETE if (x_complete and y_complete) else COLOR_DOT_INCOMPLETE
-
-        attr_dot = Rhino.DocObjects.ObjectAttributes()
-        attr_dot.LayerIndex  = idx_dots
-        attr_dot.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromObject
-        attr_dot.ObjectColor = dot_color
-        attr_dot.Name = dot_key
-
-        sc.doc.Objects.AddTextDot(td, attr_dot)
 
         records.append({
             "name": point_key, "x": x, "y": y,
@@ -2379,7 +1722,7 @@ def main():
     if count > 0:
         show_summary_dialog(records)
 
-    print "PKG Annotator v4.2: %d punto/i creato/i o aggiornato/i." % count
+    print "PKG Annotator v%s: %d punto/i creato/i o aggiornato/i." % (VERSION, count)
 
 
 if __name__ == "__main__":
