@@ -1,707 +1,1130 @@
 #! python 2
 # -*- coding: utf-8 -*-
-# PKG_Ricostruisci_Parametrico
-# Ricostruisce un tracciato cartotecnico parametrico da un file TXT esportato
-# (Rhino_Packaging_Toolkit). Chiede il file, poi le variabili L P A S C E T,
-# valuta le formule parametriche e ridisegna linee, archi, raccordi conici e
-# curve libere. Se trova la linea cyan di costruzione (UserText "A=") la usa
-# come asse di specchiatura; l'asse non vive nel tracciato finale.
-#
-# IronPython 2.7 / RhinoCommon - Rhino 7 e 8.
+"""
+PKG_Esegue_Parametrico.py   v2.1
+Rhino 7/8  |  IronPython 2.7  |  RhinoCommon
 
+Workflow:
+  1. Seleziona il file TXT (dialog file apre per primo)
+  2. Estrae automaticamente L, P, A, S, C, T, E risolvendo il sistema
+     lineare implicito nelle formule X_param/Y_param dei punti
+  3. Apre il dialog con i valori pre-caricati + preview in tempo reale
+  4. Genera le curve sui layer Taglio / Cordone / ... con tag di pulizia
+  5. Supporta l'asse di specchiatura (linea con UserText chiave "A=")
+
+Geometry builders (ironpython-examples.md):
+  Line  → Line(p1, p2).ToNurbsCurve()                          (§14)
+  Conic → NurbsCurve(3, True, order, n) + Point4d omogenee     (§12)
+  Arc   → Arc(p1, p_mid, p2).ToNurbsCurve()  o  centro+angoli  (§13)
+  Free  → NurbsCurve(3, True, order, n) + Point4d + knots      (§12)
+"""
 from __future__ import division
 
-import math
-import codecs
-
 import Rhino
-import Rhino.UI
+import Rhino.Geometry as rg
 import scriptcontext as sc
 import System
-from Rhino.Geometry import Point3d, Point4d, Vector3d, Line, Arc, Circle
-from Rhino.Geometry import Plane, NurbsCurve, Interval, Transform
+import System.Windows.Forms as WF
+import System.Drawing as SD
+import System.Drawing.Drawing2D as Drawing2D
+import math
+import re
+import os
+import codecs
 
-# ---------------------------------------------------------------------------
-# Costanti
-# ---------------------------------------------------------------------------
+_VERSION = "2.1"
 
-VARORDER = ["L", "P", "A", "S", "C", "E", "T"]
-DEFAULTS = {"L": 300.0, "P": 203.0, "A": 85.0, "S": 2.0,
-            "C": 0.0, "E": 0.0, "T": 0.0}
-OPTKEYS = {"mirror": "PKG_OPT_MIRROR", "axis": "PKG_OPT_AXIS",
-           "points": "PKG_OPT_POINTS", "clear": "PKG_OPT_CLEAR",
-           "fillets": "PKG_OPT_FILLETS"}
-TAG_KEY = "PKG_GEN"
+# ── Tag oggetti generati ───────────────────────────────────────────
+TAG_KEY = "PKG_GEN_TXT"
 TAG_VAL = "1"
 
-# colonne (0-based) del TXT
-C_ID = 0
-C_TIPO = 1
-C_GEOM = 2
-C_LAYER = 4
-C_X1 = 5
-C_Y1 = 6
-C_X2 = 7
-C_Y2 = 8
-C_R = 9
-C_CP = 17
-C_USER = 21
+# ── Colonne TXT ────────────────────────────────────────────────────
+C_TIPO, C_GEOM, C_LAYER = 1, 2, 4
+C_X1, C_Y1, C_X2, C_Y2  = 5, 6, 7, 8
 
-HAS_ETO = True
-try:
-    import Eto.Forms as _ETOF
-    import Eto.Drawing as _ETOD
-except:
-    HAS_ETO = False
+# ── Variabili parametriche ─────────────────────────────────────────
+VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
+DEFAULTS  = {"L": 50.0, "P": 25.0, "A": 80.0, "S": 0.5,
+             "C": 18.0, "T": 18.0, "E": 3.0}
 
-# Formule che non e' stato possibile interpretare (diagnostica visibile)
-EVAL_ERRORS = []
+# ── Colori layer standard ──────────────────────────────────────────
+LAYER_COLORS = {
+    "Taglio":               SD.Color.Black,
+    "Cordone":              SD.Color.FromArgb(255,   0,   0),
+    "MezzoTaglio":          SD.Color.FromArgb(  0, 170,   0),
+    "Foratore":             SD.Color.FromArgb(255, 140,   0),
+    "PKG_Costruzione_Cyan": SD.Color.FromArgb(  0, 200, 200),
+    "Predefinito":          SD.Color.FromArgb(128, 128, 128),
+}
 
-# ---------------------------------------------------------------------------
-# Valutatore di espressioni parametriche (parser proprio, niente eval)
-# Gestisce: numeri, variabili L P A S C E T, operatori + - * / , parentesi,
-# meno e piu' unari. Deterministico e indipendente da IronPython.
-# ---------------------------------------------------------------------------
+# Colori preview
+_COL_TAGLIO  = SD.Color.Black
+_COL_CORDONE = SD.Color.FromArgb(255, 0, 0)
+_COL_OTHER   = SD.Color.FromArgb(70, 130, 180)
 
-def _tokenize(s):
-    toks = []
-    i = 0
-    n = len(s)
-    while i < n:
-        ch = s[i]
-        if ch == " " or ch == "\t":
-            i += 1
-            continue
-        if ch in "()+-*/":
-            toks.append(("op", ch))
-            i += 1
-            continue
-        if ch.isdigit() or ch == ".":
-            j = i
-            while j < n and (s[j].isdigit() or s[j] == "."):
-                j += 1
-            toks.append(("num", float(s[i:j])))
-            i = j
-            continue
-        if ch.isalpha() or ch == "_":
-            j = i
-            while j < n and (s[j].isalnum() or s[j] == "_"):
-                j += 1
-            toks.append(("name", s[i:j]))
-            i = j
-            continue
-        raise ValueError("carattere non valido '%s'" % ch)
-    return toks
+ALLOWED_FUNCS = {
+    "abs":  abs,  "sqrt": math.sqrt,
+    "sin":  math.sin, "cos": math.cos, "tan": math.tan, "pi": math.pi,
+}
+_SAFE_RE = re.compile(r"^[0-9\.\+\-\*\/\(\)\,\s a-zA-Z_]+$")
 
 
-class _Parser(object):
-    def __init__(self, toks, env):
-        self.t = toks
-        self.i = 0
-        self.env = env
+# ═══════════════════════════════════════════════════════════════════
+#  Parsing e valutazione
+# ═══════════════════════════════════════════════════════════════════
 
-    def _peek(self):
-        if self.i < len(self.t):
-            return self.t[self.i]
-        return (None, None)
-
-    def _next(self):
-        tok = self.t[self.i]
-        self.i += 1
-        return tok
-
-    def parse_expr(self):
-        v = self._term()
-        while True:
-            k, o = self._peek()
-            if k == "op" and (o == "+" or o == "-"):
-                self._next()
-                r = self._term()
-                v = v + r if o == "+" else v - r
-            else:
-                break
-        return v
-
-    def _term(self):
-        v = self._factor()
-        while True:
-            k, o = self._peek()
-            if k == "op" and (o == "*" or o == "/"):
-                self._next()
-                r = self._factor()
-                v = v * r if o == "*" else v / r
-            else:
-                break
-        return v
-
-    def _factor(self):
-        k, o = self._peek()
-        if k == "op" and (o == "+" or o == "-"):
-            self._next()
-            v = self._factor()
-            return v if o == "+" else -v
-        return self._primary()
-
-    def _primary(self):
-        k, o = self._peek()
-        if k == "num":
-            self._next()
-            return o
-        if k == "name":
-            self._next()
-            if o in self.env:
-                return float(self.env[o])
-            up = o.upper()
-            if up in self.env:
-                return float(self.env[up])
-            raise ValueError("variabile sconosciuta '%s'" % o)
-        if k == "op" and o == "(":
-            self._next()
-            v = self.parse_expr()
-            k2, o2 = self._peek()
-            if not (k2 == "op" and o2 == ")"):
-                raise ValueError("parentesi ')' mancante")
-            self._next()
-            return v
-        raise ValueError("token inatteso")
-
-
-def eval_expr(expr, env):
-    toks = _tokenize(expr)
-    if not toks:
-        return None
-    p = _Parser(toks, env)
-    v = p.parse_expr()
-    if p.i != len(toks):
-        raise ValueError("token residui in '%s'" % expr)
-    return float(v)
-
-
-# ---------------------------------------------------------------------------
-# Helper numerici e di parsing
-# ---------------------------------------------------------------------------
-
-def to_float(s):
-    if s is None:
-        return None
-    s = str(s).strip()
-    if s == "" or s == "-":
-        return None
-    try:
-        return float(s)
-    except:
-        return None
-
-
-def to_float_input(s):
-    """Come to_float ma accetta anche la virgola decimale (formato italiano)."""
-    if s is None:
-        return None
-    s = str(s).strip().replace(",", ".")
-    if s == "" or s == "-":
-        return None
-    try:
-        return float(s)
-    except:
-        return None
-
-
-def col_f(row, i):
-    if i >= len(row):
-        return None
-    return to_float(row[i])
-
-
-def col_pt(row, ix, iy):
-    x = col_f(row, ix)
-    y = col_f(row, iy)
-    if x is None or y is None:
-        return None
-    return Point3d(x, y, 0.0)
-
-
-def evf(expr, V):
-    """Valuta una formula scalare con le variabili (tutte float).
-    In caso di formula non interpretabile la registra in EVAL_ERRORS."""
-    if expr is None:
-        return None
-    expr = expr.strip()
-    if expr == "" or expr == "-":
-        return None
-    env = {}
-    for k in V:
-        env[k] = float(V[k])
-    try:
-        return eval_expr(expr, env)
-    except Exception as e:
-        EVAL_ERRORS.append((expr, str(e)))
-        return None
-
-
-def strip_outer(s):
-    """Toglie una sola coppia di parentesi se avvolge tutta la stringa."""
-    s = s.strip()
-    if len(s) >= 2 and s[0] == "(" and s[-1] == ")":
-        depth = 0
-        for i in range(len(s)):
-            ch = s[i]
-            if ch == "(":
-                depth += 1
-            elif ch == ")":
-                depth -= 1
-                if depth == 0 and i < len(s) - 1:
-                    return s
-        return s[1:-1]
-    return s
-
-
-def split_top_comma(s):
-    """Divide su virgola a profondita di parentesi 0."""
-    parts = []
-    depth = 0
-    cur = []
-    for ch in s:
-        if ch == "(":
-            depth += 1
-            cur.append(ch)
-        elif ch == ")":
-            depth -= 1
-            cur.append(ch)
-        elif ch == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
-    parts.append("".join(cur))
-    return parts
-
-
-def parse_pair(s, V):
-    """(expr_x, expr_y) -> Point3d valutato con le variabili."""
-    if not s:
-        return None
-    inner = strip_outer(s)
-    parts = split_top_comma(inner)
-    if len(parts) != 2:
-        return None
-    x = evf(parts[0], V)
-    y = evf(parts[1], V)
-    if x is None or y is None:
-        return None
-    return Point3d(x, y, 0.0)
-
-
-def parse_userdict(s):
-    """Blocco UserText 'k=v;k=v;...' -> dizionario. 'A= ' -> chiave 'A'."""
+def parse_ut(s):
+    """'k1=v1;k2=v2;...' → dict."""
     d = {}
-    for tok in s.split(";"):
-        tok = tok.strip()
-        if tok == "":
-            continue
-        if "=" in tok:
-            k, _, v = tok.partition("=")
+    if not s or s == "-":
+        return d
+    for kv in s.split(";"):
+        if "=" in kv:
+            k, v = kv.split("=", 1)
             d[k.strip()] = v.strip()
-        else:
-            d[tok] = ""
     return d
 
 
-def parse_ctrlpoints(s):
-    """CtrlPoints UserText: 'x,y,w|x,y,w|...' (separatore lista = '|')."""
-    out = []
-    for tok in s.split("|"):
-        tok = tok.strip()
-        if tok == "":
+def safe_eval(expr, vd):
+    """Valuta espressione parametrica PKG. Ritorna float o None."""
+    if not expr or expr in ("-", "--", "non_associato"):
+        return None
+    expr = expr.strip()
+    if not _SAFE_RE.match(expr):
+        return None
+    tokens = re.findall(r"[a-zA-Z_][a-zA-Z_0-9]*", expr)
+    allowed = set(VAR_NAMES) | set(ALLOWED_FUNCS)
+    for tok in tokens:
+        if tok not in allowed:
+            return None
+    try:
+        code = compile(expr, "<pkg>", "eval")
+    except SyntaxError:
+        return None
+    ns = {"__builtins__": {}}
+    ns.update(ALLOWED_FUNCS)
+    ns.update(vd)
+    try:
+        return float(eval(code, ns, {}))
+    except Exception:
+        return None
+
+
+def eval_pt(param_str, vd):
+    """'(ex, ey)' → Point3d o None."""
+    if not param_str:
+        return None
+    s = param_str.strip()
+    # Cerca virgola al top-level delle parentesi esterne
+    m = re.match(r"\(\s*(.+?),\s*(.+?)\s*\)\s*$", s)
+    if not m:
+        if s.startswith("(") and s.endswith(")"):
+            inner = s[1:-1]
+            depth = 0; split_pos = None
+            for i, ch in enumerate(inner):
+                if ch in "([":   depth += 1
+                elif ch in ")]": depth -= 1
+                elif ch == "," and depth == 0:
+                    split_pos = i; break
+            if split_pos is None:
+                return None
+            ex, ey = inner[:split_pos].strip(), inner[split_pos+1:].strip()
+        else:
+            return None
+    else:
+        ex, ey = m.group(1), m.group(2)
+    x = safe_eval(ex, vd)
+    y = safe_eval(ey, vd)
+    if x is None or y is None:
+        return None
+    return rg.Point3d(x, y, 0.0)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Derivazione automatica dei parametri dal TXT
+# ═══════════════════════════════════════════════════════════════════
+
+def derive_vars(rows):
+    """
+    Estrae L, P, A, S, C, T, E risolvendo iterativamente il sistema
+    lineare dai punti parametrici del TXT.
+
+    Metodo: per ogni formula con N incognite sintattiche,
+    imposta TUTTE a 0 (val_zero), poi testa ognuna a 1.
+    Se UNA SOLA ha coefficiente != 0 (le altre si cancellano
+    algebricamente, es. (C+L-S)+S = C+L), risolve per quella.
+    """
+    pairs = []
+    for row in rows:
+        if len(row) < 6 or row[C_GEOM].strip() != "Point":
             continue
-        p = tok.split(",")
-        if len(p) >= 3:
-            out.append((to_float(p[0]), to_float(p[1]), to_float(p[2])))
-        elif len(p) == 2:
-            out.append((to_float(p[0]), to_float(p[1]), 1.0))
-    return out
+        ut = parse_ut(row[-1])
+        for ax in ("X", "Y"):
+            formula = ut.get("%s_param" % ax)
+            reale   = ut.get("%s_reale" % ax)
+            if formula and reale and formula.strip() not in ("0", "-", ""):
+                try:
+                    pairs.append((formula.strip(), float(reale)))
+                except ValueError:
+                    pass
+
+    known  = {}
+    for _it in range(20):
+        changed = False
+        for formula, target in pairs:
+            if not _SAFE_RE.match(formula):
+                continue
+            tokens  = set(re.findall(r"[a-zA-Z_][a-zA-Z_0-9]*", formula))
+            unknown = [v for v in VAR_NAMES if v in tokens and v not in known]
+            if not unknown:
+                continue
+
+            # Namespace: noti + tutte le incognite a 0
+            ns0 = {"__builtins__": {}}
+            ns0.update(ALLOWED_FUNCS); ns0.update(known)
+            for uv in unknown:
+                ns0[uv] = 0.0
+
+            try:
+                code     = compile(formula, "<d>", "eval")
+                val_zero = float(eval(code, ns0, {}))
+            except Exception:
+                continue
+
+            # Coefficienti effettivi (cancellazioni algebriche → coeff=0)
+            effective = []
+            for uv in unknown:
+                ns1 = dict(ns0); ns1[uv] = 1.0
+                try:
+                    coeff = float(eval(code, ns1, {})) - val_zero
+                    if abs(coeff) > 1e-10:
+                        effective.append((uv, coeff))
+                except Exception:
+                    pass
+
+            if len(effective) == 1:
+                var, coeff = effective[0]
+                if var not in known:
+                    known[var] = round((target - val_zero) / coeff, 6)
+                    changed = True
+
+        if not changed:
+            break
+
+    return known
 
 
-def parse_cp_col(s):
-    """Colonna CP del TXT: 'x,y,w;x,y,w;...' (separatore lista = ';')."""
-    out = []
-    for tok in s.split(";"):
-        tok = tok.strip()
-        if tok == "":
+# ═══════════════════════════════════════════════════════════════════
+#  Dati per il preview
+# ═══════════════════════════════════════════════════════════════════
+
+def build_preview_curves(rows):
+    """
+    Lista di (tipo_T/C/..., 'line'|'conic'|'abs', data) per il preview.
+    'abs' usa coordinate assolute (non scala con i parametri).
+    """
+    result = []
+    for row in rows:
+        if len(row) < 6:
             continue
-        p = tok.split(",")
-        if len(p) >= 3:
-            out.append((to_float(p[0]), to_float(p[1]), to_float(p[2])))
-        elif len(p) == 2:
-            out.append((to_float(p[0]), to_float(p[1]), 1.0))
-    return out
+        tipo = row[C_TIPO]
+        if tipo == "P":
+            continue
+        geom = row[C_GEOM].strip()
+        ut   = parse_ut(row[-1])
+
+        has_p1 = bool(ut.get("P1_param"))
+        has_p2 = bool(ut.get("P2_param"))
+        tipo_orig = ut.get("Tipo_Originale", "")
+        cmd       = ut.get("Comando", "")
+
+        if has_p1 and has_p2:
+            if tipo_orig == "Nurbs" or cmd == "_InterpCrv":
+                result.append((tipo, "conic", ut))
+            else:
+                result.append((tipo, "line", ut))
+        elif geom == "Line":
+            # Fallback assoluto (non parametrico)
+            try:
+                x1, y1 = float(row[C_X1]), float(row[C_Y1])
+                x2, y2 = float(row[C_X2]), float(row[C_Y2])
+                result.append((tipo, "abs", (x1, y1, x2, y2)))
+            except (ValueError, IndexError):
+                pass
+    return result
 
 
-def parse_knots(s):
-    out = []
-    for x in s.split("|"):
-        v = to_float(x)
-        if v is not None:
-            out.append(v)
-    return out
+# ═══════════════════════════════════════════════════════════════════
+#  Disegno preview
+# ═══════════════════════════════════════════════════════════════════
+
+def draw_preview(g, curves, vd, W, H):
+    """Disegna il tracciato scalato nella Graphics del bitmap."""
+    MARGIN = 10
+
+    # Raccoglie tutti i punti per il bounding box
+    all_pts = []
+    for tipo, geom, data in curves:
+        if geom in ("line", "conic"):
+            ut = data
+            p1 = eval_pt(ut.get("P1_param"), vd)
+            p2 = eval_pt(ut.get("P2_param"), vd)
+            if p1: all_pts.append((p1.X, p1.Y))
+            if p2: all_pts.append((p2.X, p2.Y))
+        elif geom == "abs":
+            x1, y1, x2, y2 = data
+            all_pts.extend([(x1, y1), (x2, y2)])
+
+    if len(all_pts) < 2:
+        return
+
+    min_x = min(p[0] for p in all_pts)
+    max_x = max(p[0] for p in all_pts)
+    min_y = min(p[1] for p in all_pts)
+    max_y = max(p[1] for p in all_pts)
+
+    rx = max_x - min_x
+    ry = max_y - min_y
+    if rx < 1 or ry < 1:
+        return
+
+    avail_w = W - 2 * MARGIN
+    avail_h = H - 2 * MARGIN
+    scale = min(avail_w / rx, avail_h / ry)
+
+    # Centra orizzontalmente e verticalmente
+    ox = MARGIN + (avail_w - rx * scale) / 2.0
+    oy = MARGIN + (avail_h - ry * scale) / 2.0
+
+    def sc(x, y):
+        """Model → screen (Y flippato)."""
+        return (ox + (x - min_x) * scale,
+                H  - oy - (y - min_y) * scale)
+
+    pen_T = SD.Pen(_COL_TAGLIO,  1.0)
+    pen_C = SD.Pen(_COL_CORDONE, 1.0)
+    pen_O = SD.Pen(_COL_OTHER,   1.0)
+
+    try:
+        for tipo, geom, data in curves:
+            pen = pen_T if tipo == "T" else (pen_C if tipo == "C" else pen_O)
+
+            if geom == "line":
+                ut = data
+                p1 = eval_pt(ut.get("P1_param"), vd)
+                p2 = eval_pt(ut.get("P2_param"), vd)
+                if p1 and p2:
+                    ax, ay = sc(p1.X, p1.Y)
+                    bx, by = sc(p2.X, p2.Y)
+                    g.DrawLine(pen, int(ax), int(ay), int(bx), int(by))
+
+            elif geom == "conic":
+                ut = data
+                p1 = eval_pt(ut.get("P1_param"), vd)
+                p2 = eval_pt(ut.get("P2_param"), vd)
+                if p1 and p2:
+                    try:
+                        fu = float(ut.get("CtrlProp_u", "0"))
+                        fv = float(ut.get("CtrlProp_v", "0"))
+                        dx = p2.X - p1.X
+                        dy = p2.Y - p1.Y
+                        cpx = p1.X + fu * dx
+                        cpy = p1.Y + fv * dy
+                        # Bezier quadratico approssimato con 10 segmenti
+                        N = 10
+                        prev = sc(p1.X, p1.Y)
+                        for i in range(1, N + 1):
+                            t = i / float(N)
+                            mt = 1.0 - t
+                            bx = mt*mt*p1.X + 2*mt*t*cpx + t*t*p2.X
+                            by = mt*mt*p1.Y + 2*mt*t*cpy + t*t*p2.Y
+                            curr = sc(bx, by)
+                            g.DrawLine(pen, int(prev[0]), int(prev[1]),
+                                       int(curr[0]), int(curr[1]))
+                            prev = curr
+                    except Exception:
+                        ax, ay = sc(p1.X, p1.Y)
+                        bx, by = sc(p2.X, p2.Y)
+                        g.DrawLine(pen, int(ax), int(ay), int(bx), int(by))
+
+            elif geom == "abs":
+                x1, y1, x2, y2 = data
+                ax, ay = sc(x1, y1)
+                bx, by = sc(x2, y2)
+                g.DrawLine(pen, int(ax), int(ay), int(bx), int(by))
+
+    finally:
+        pen_T.Dispose()
+        pen_C.Dispose()
+        pen_O.Dispose()
 
 
-# ---------------------------------------------------------------------------
-# Trasformazioni
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════
+#  Dialog con preview live
+# ═══════════════════════════════════════════════════════════════════
+
+class _DlgParams(WF.Form):
+    """
+    Dialog parametri con preview a destra aggiornato in tempo reale.
+    Carica i default già derivati dal TXT. Supporta asse/specchiatura.
+    """
+    _FIELDS = [
+        ("L", "Larghezza pannello  L", "L"),
+        ("P", "Profondita\u2019  P",   "P"),
+        ("A", "Altezza  A",            "A"),
+        ("S", "Spessore cartone  S",   "S"),
+        (None, None, None),
+        ("C", "Aletta incollaggio  C", "C"),
+        ("T", "Lock inferiore  T",     "T"),
+        ("E", "Smusso angoli  E",      "E"),
+    ]
+
+    def __init__(self, defaults, preview_curves, has_axis=False, has_fillets=False):
+        self.SuspendLayout()
+        self._tbs = {}
+        self._preview_curves = preview_curves
+        self._preview_bmp    = None
+
+        # ── Form ──────────────────────────────────────────────────
+        FORM_W, FORM_H = 548, 448
+        self.Text            = u"PKG \u2013 Genera Da TXT   v%s" % _VERSION
+        self.FormBorderStyle = WF.FormBorderStyle.FixedDialog
+        self.MaximizeBox     = False
+        self.MinimizeBox     = False
+        self.StartPosition   = WF.FormStartPosition.CenterScreen
+        self.ClientSize      = SD.Size(FORM_W, FORM_H)
+
+        # ── Intestazione parametri ─────────────────────────────────
+        LX = 10          # left origin X
+        lbl_h = WF.Label()
+        lbl_h.Text     = "Parametri [mm]:"
+        lbl_h.Font     = SD.Font("Segoe UI", 9.0, SD.FontStyle.Bold)
+        lbl_h.Location = SD.Point(LX, 12)
+        lbl_h.Size     = SD.Size(225, 18)
+        self.Controls.Add(lbl_h)
+
+        y = 35
+        for (key, label, _) in self._FIELDS:
+            if key is None:
+                sep = WF.Label()
+                sep.BorderStyle = WF.BorderStyle.Fixed3D
+                sep.Location    = SD.Point(LX, y + 5)
+                sep.Size        = SD.Size(225, 2)
+                self.Controls.Add(sep)
+                y += 16
+                continue
+
+            lbl = WF.Label()
+            lbl.Text     = label
+            lbl.Location = SD.Point(LX, y + 3)
+            lbl.Size     = SD.Size(148, 18)
+            self.Controls.Add(lbl)
+
+            val = defaults.get(key, DEFAULTS.get(key, 0.0))
+            tb  = WF.TextBox()
+            tb.Text      = ("%.4g" % val).replace(".", ",")
+            tb.Location  = SD.Point(LX + 150, y)
+            tb.Size      = SD.Size(75, 22)
+            tb.TextAlign = WF.HorizontalAlignment.Right
+            tb.TextChanged += self._on_change
+            self.Controls.Add(tb)
+            self._tbs[key] = tb
+            y += 28
+
+        # ── Separatore + Checkbox ──────────────────────────────────
+        y += 6
+        sep2 = WF.Label()
+        sep2.BorderStyle = WF.BorderStyle.Fixed3D
+        sep2.Location    = SD.Point(LX, y + 4)
+        sep2.Size        = SD.Size(225, 2)
+        self.Controls.Add(sep2)
+        y += 14
+
+        self._cb_mirror = WF.CheckBox()
+        self._cb_mirror.Text     = "Specchia sull'asse"
+        self._cb_mirror.Location = SD.Point(LX, y)
+        self._cb_mirror.Size     = SD.Size(225, 20)
+        self._cb_mirror.Enabled  = has_axis
+        self._cb_mirror.Checked  = False
+        self.Controls.Add(self._cb_mirror)
+        y += 24
+
+        self._cb_axis = WF.CheckBox()
+        self._cb_axis.Text     = "Mostra asse di costruzione"
+        self._cb_axis.Location = SD.Point(LX, y)
+        self._cb_axis.Size     = SD.Size(225, 20)
+        self._cb_axis.Enabled  = has_axis
+        self._cb_axis.Checked  = False
+        self.Controls.Add(self._cb_axis)
+        y += 24
+
+        self._cb_clear = WF.CheckBox()
+        self._cb_clear.Text     = "Cancella generazione precedente"
+        self._cb_clear.Location = SD.Point(LX, y)
+        self._cb_clear.Size     = SD.Size(225, 20)
+        self._cb_clear.Checked  = True
+        self.Controls.Add(self._cb_clear)
+        y += 24
+
+        self._cb_fillets = WF.CheckBox()
+        self._cb_fillets.Text     = "Calcola raccordi"
+        self._cb_fillets.Location = SD.Point(LX, y)
+        self._cb_fillets.Size     = SD.Size(225, 20)
+        self._cb_fillets.Enabled  = has_fillets
+        self._cb_fillets.Checked  = has_fillets
+        self.Controls.Add(self._cb_fillets)
+
+        # ── Preview ────────────────────────────────────────────────
+        PX  = 240          # preview origin X
+        PY  = 10
+        PW  = FORM_W - PX - 10
+        PH  = FORM_H - 80
+
+        lbl_prev = WF.Label()
+        lbl_prev.Text      = "Preview"
+        lbl_prev.Font      = SD.Font("Segoe UI", 8.0, SD.FontStyle.Italic)
+        lbl_prev.ForeColor = SD.Color.FromArgb(80, 80, 80)
+        lbl_prev.Location  = SD.Point(PX, PY)
+        lbl_prev.Size      = SD.Size(PW, 16)
+        lbl_prev.TextAlign = SD.ContentAlignment.MiddleCenter
+        self.Controls.Add(lbl_prev)
+
+        self._pb = WF.PictureBox()
+        self._pb.Location    = SD.Point(PX, PY + 18)
+        self._pb.Size        = SD.Size(PW, PH)
+        self._pb.BorderStyle = WF.BorderStyle.Fixed3D
+        self._pb.BackColor   = SD.Color.White
+        self._pb.SizeMode    = WF.PictureBoxSizeMode.Normal
+        self.Controls.Add(self._pb)
+
+        # Legenda preview: due label colorati
+        half_W = PW // 2
+        lbl_tag = WF.Label()
+        lbl_tag.Text      = u"\u25a0 Taglio"
+        lbl_tag.Font      = SD.Font("Segoe UI", 7.5)
+        lbl_tag.ForeColor = SD.Color.Black
+        lbl_tag.Location  = SD.Point(PX, PY + 18 + PH + 2)
+        lbl_tag.Size      = SD.Size(half_W, 14)
+        lbl_tag.TextAlign = SD.ContentAlignment.MiddleRight
+        self.Controls.Add(lbl_tag)
+
+        lbl_cord = WF.Label()
+        lbl_cord.Text      = u"\u25a0 Cordone"
+        lbl_cord.Font      = SD.Font("Segoe UI", 7.5)
+        lbl_cord.ForeColor = SD.Color.FromArgb(255, 0, 0)
+        lbl_cord.Location  = SD.Point(PX + half_W + 8, PY + 18 + PH + 2)
+        lbl_cord.Size      = SD.Size(PW - half_W - 8, 14)
+        lbl_cord.TextAlign = SD.ContentAlignment.MiddleLeft
+        self.Controls.Add(lbl_cord)
+
+        # ── Pulsanti ───────────────────────────────────────────────
+        BY = FORM_H - 42
+        btn_ok = WF.Button()
+        btn_ok.Text         = "Genera"
+        btn_ok.DialogResult = WF.DialogResult.OK
+        btn_ok.Location     = SD.Point(FORM_W // 2 - 100, BY)
+        btn_ok.Size         = SD.Size(90, 28)
+        self.Controls.Add(btn_ok)
+        self.AcceptButton   = btn_ok
+
+        btn_no = WF.Button()
+        btn_no.Text         = "Annulla"
+        btn_no.DialogResult = WF.DialogResult.Cancel
+        btn_no.Location     = SD.Point(FORM_W // 2 + 10, BY)
+        btn_no.Size         = SD.Size(90, 28)
+        self.Controls.Add(btn_no)
+        self.CancelButton   = btn_no
+
+        self.ResumeLayout(False)
+        self._refresh_preview()
+
+    # ── Aggiornamento preview ──────────────────────────────────────
+    def _on_change(self, s, e):
+        self._refresh_preview()
+
+    def _refresh_preview(self):
+        vd = self._read_vd()
+        W  = self._pb.Width
+        H  = self._pb.Height
+        if W <= 0 or H <= 0:
+            return
+        bmp = SD.Bitmap(W, H)
+        g   = SD.Graphics.FromImage(bmp)
+        try:
+            g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
+            g.Clear(SD.Color.White)
+            if vd and all(vd.get(k, 0) > 0 for k in ("L", "P", "A")):
+                draw_preview(g, self._preview_curves, vd, W, H)
+            else:
+                font  = SD.Font("Segoe UI", 8.5)
+                brush = SD.SolidBrush(SD.Color.FromArgb(160, 160, 160))
+                sf    = SD.StringFormat()
+                sf.Alignment     = SD.StringAlignment.Center
+                sf.LineAlignment = SD.StringAlignment.Center
+                g.DrawString("Inserisci valori L, P, A > 0",
+                             font, brush,
+                             SD.RectangleF(0, 0, W, H), sf)
+                font.Dispose(); brush.Dispose()
+        finally:
+            g.Dispose()
+        old = self._pb.Image
+        self._pb.Image = bmp
+        if old is not None:
+            old.Dispose()
+
+    # ── Lettura valori ─────────────────────────────────────────────
+    def _read_vd(self):
+        vd = {}
+        for k, tb in self._tbs.items():
+            raw = tb.Text.strip().replace(",", ".")
+            try:
+                vd[k] = float(raw)
+            except ValueError:
+                pass
+        return vd
+
+    def get_values(self):
+        vd = {}
+        for k, tb in self._tbs.items():
+            raw = tb.Text.strip().replace(",", ".")
+            try:
+                vd[k] = float(raw)
+            except ValueError:
+                WF.MessageBox.Show(
+                    "Valore non valido per '%s': '%s'" % (k, raw),
+                    "Errore input",
+                    WF.MessageBoxButtons.OK,
+                    WF.MessageBoxIcon.Error)
+                return None
+        return vd
+
+    def get_opts(self):
+        return {
+            "mirror":   bool(self._cb_mirror.Checked   and self._cb_mirror.Enabled),
+            "axis":     bool(self._cb_axis.Checked     and self._cb_axis.Enabled),
+            "clear":    bool(self._cb_clear.Checked),
+            "fillets":  bool(self._cb_fillets.Checked  and self._cb_fillets.Enabled),
+        }
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Costruttori di geometria
+#  Regole da ironpython-examples.md:
+#  §12 NurbsCurve razionale → NurbsCurve(3, True, order, n) + Point4d
+#      MAI NurbsCurve.Create (non-razionale) + SetPoint(i, Point3d, w)
+#  §14 Linea → Line(p1, p2).ToNurbsCurve()
+#  §13 Arco  → Arc(cerchio, Interval).ToNurbsCurve()
+# ═══════════════════════════════════════════════════════════════════
+
+def build_line(ut, vd):
+    """Linea retta parametrica da P1_param / P2_param."""
+    p1 = eval_pt(ut.get("P1_param"), vd)
+    p2 = eval_pt(ut.get("P2_param"), vd)
+    if p1 and p2:
+        # §14: Line(p1,p2).ToNurbsCurve() — non LineCurve
+        return rg.Line(p1, p2).ToNurbsCurve(), None
+    return None, "line: punti non valutabili"
+
+
+def build_conic(ut, vd):
+    """
+    NURBS razionale grado 2 (raccordo conico / Bezier conica).
+    §12 ironpython-examples.md:
+      - Costruttore NurbsCurve(3, True, order, n_pts) per curva RAZIONALE
+      - Knot vector clamped esplicito
+      - Point4d in coordinate omogenee: Point4d(x*w, y*w, z*w, w)
+      - MAI NurbsCurve.Create + SetPoint(i, Point3d, w) su curva non-razionale
+    """
+    p1 = eval_pt(ut.get("P1_param"), vd)
+    p2 = eval_pt(ut.get("P2_param"), vd)
+    if p1 is None or p2 is None:
+        return None, "conic: P1/P2 non valutabili"
+    try:
+        fu = float(ut.get("CtrlProp_u", "0"))
+        fv = float(ut.get("CtrlProp_v", "0"))
+    except (ValueError, TypeError):
+        return None, "conic: CtrlProp illeggibili"
+    try:
+        fw = float(ut.get("CtrlPeso_w", "1.0"))
+        if fw < 1e-9:
+            fw = 1.0
+    except (ValueError, TypeError):
+        fw = 1.0
+    dx  = p2.X - p1.X
+    dy  = p2.Y - p1.Y
+    cpx = p1.X + fu * dx
+    cpy = p1.Y + fv * dy
+
+    # Curva NURBS razionale: dim=3, rational=True, order=3, n_pts=3
+    degree = 2
+    nc = rg.NurbsCurve(3, True, degree + 1, 3)
+
+    # Knot vector clamped per grado 2 con 3 CP:
+    # Knots.Count = n_pts + degree - 1 = 4  →  [0, 0, 1, 1]
+    for i in range(nc.Knots.Count):
+        nc.Knots[i] = 0.0 if i < degree else 1.0
+
+    # Control points in coordinate omogenee  Point4d(x*w, y*w, z*w, w)
+    nc.Points.SetPoint(0, rg.Point4d(p1.X,       p1.Y,       0.0, 1.0))
+    nc.Points.SetPoint(1, rg.Point4d(cpx * fw,   cpy * fw,   0.0, fw ))
+    nc.Points.SetPoint(2, rg.Point4d(p2.X,       p2.Y,       0.0, 1.0))
+
+    if not nc.IsValid:
+        return None, "conic: NurbsCurve non valida dopo costruzione"
+    return nc, None
+
+
+def build_arc(ut, vd):
+    """
+    Arco da tre punti: start, Punto_medio, end  (§13 ironpython-examples.md).
+    Il Punto_medio determina univocamente il lato e il verso; non ci sono
+    ambiguità di piano/segno. Fallback: centro geometrico + raggio + angoli.
+    """
+    p1 = eval_pt(ut.get("P1_param"), vd)
+    p2 = eval_pt(ut.get("P2_param"), vd)
+    if p1 is None or p2 is None:
+        return None, "arc: P1/P2 non valutabili"
+
+    # Via canonica: tre punti (start, mid, end)
+    pm_str = ut.get("Punto_medio")
+    if pm_str:
+        try:
+            parts  = pm_str.split(",")
+            mx, my = float(parts[0]), float(parts[1])
+            p_mid  = rg.Point3d(mx, my, 0.0)
+            arc    = rg.Arc(p1, p_mid, p2)
+            if arc.IsValid:
+                return arc.ToNurbsCurve(), None
+        except Exception:
+            pass
+
+    # Fallback: centro geometrico + raggio + angoli
+    cg = ut.get("Centro_geom")
+    if not cg:
+        return None, "arc: ne Punto_medio ne Centro_geom"
+    try:
+        cx, cy = float(cg.split(",")[0]), float(cg.split(",")[1])
+        r      = float(ut.get("Raggio", "0"))
+        a0     = math.radians(float(ut.get("AngStart_deg", "0")))
+        a1     = math.radians(float(ut.get("AngEnd_deg",   "0")))
+    except Exception as ex:
+        return None, "arc: dati geometrici mancanti (%s)" % ex
+    verso  = ut.get("Verso", "CCW")
+    normal = rg.Vector3d(0, 0, -1) if verso == "CW" else rg.Vector3d(0, 0, 1)
+    plane  = rg.Plane(rg.Point3d(cx, cy, 0.0), normal)
+    iv     = rg.Interval(abs(a0), abs(a1))
+    if iv.Length < 1e-9:
+        iv = rg.Interval(0.0, 2.0 * math.pi)
+    try:
+        arc = rg.Arc(rg.Circle(plane, r), iv)
+        if arc.IsValid:
+            return arc.ToNurbsCurve(), None
+    except Exception as ex:
+        pass
+    return None, "arc: costruzione fallita"
+
+
+def build_free(ut, vd):
+    """
+    NURBS libera da CtrlPoints (x,y,w|x,y,w|...) + Nodi opzionali.
+    Costruzione con Point4d per il supporto razionale (§12).
+    Gli estremi vengono spostati alle coordinate parametriche se disponibili.
+    """
+    cps_str = ut.get("CtrlPoints")
+    if not cps_str:
+        return None, "free: CtrlPoints assente"
+
+    cps = []
+    for tok in cps_str.split("|"):
+        tok = tok.strip()
+        if not tok:
+            continue
+        parts = tok.split(",")
+        try:
+            x = float(parts[0]); y = float(parts[1])
+            w = float(parts[2]) if len(parts) >= 3 else 1.0
+            cps.append((x, y, w))
+        except (ValueError, IndexError):
+            return None, "free: CP malformato '%s'" % tok
+    if len(cps) < 2:
+        return None, "free: meno di 2 CP"
+
+    try:
+        degree = int(ut.get("Grado", "3"))
+    except (ValueError, TypeError):
+        degree = 3
+    degree = min(degree, len(cps) - 1)
+    order  = degree + 1
+    n_pts  = len(cps)
+
+    # NurbsCurve razionale
+    nc  = rg.NurbsCurve(3, True, order, n_pts)
+    kc  = nc.Knots.Count
+    nodi_str = ut.get("Nodi")
+    if nodi_str:
+        try:
+            knots = [float(v) for v in nodi_str.split("|")]
+            if len(knots) == kc:
+                for i in range(kc):
+                    nc.Knots[i] = knots[i]
+            else:
+                nodi_str = None  # incompatibile → default
+        except Exception:
+            nodi_str = None
+    if not nodi_str:
+        # Knot vector clamped uniforme
+        inner = kc - 2 * degree
+        for i in range(kc):
+            if i < degree:
+                nc.Knots[i] = 0.0
+            elif i >= kc - degree:
+                nc.Knots[i] = 1.0
+            else:
+                nc.Knots[i] = (i - degree + 1) / float(inner + 1)
+
+    for i, (x, y, w) in enumerate(cps):
+        if w is None or w < 1e-12:
+            w = 1.0
+        nc.Points.SetPoint(i, rg.Point4d(x * w, y * w, 0.0, w))
+
+    if not nc.IsValid:
+        return None, "free: NurbsCurve non valida"
+
+    # Sposta gli estremi alle coordinate parametriche (se annotate)
+    p1n = eval_pt(ut.get("P1_param"), vd)
+    p2n = eval_pt(ut.get("P2_param"), vd)
+    if p1n or p2n:
+        o1 = rg.Point3d(cps[0][0],  cps[0][1],  0.0)
+        o2 = rg.Point3d(cps[-1][0], cps[-1][1], 0.0)
+        n1 = p1n if p1n else o1
+        n2 = p2n if p2n else o2
+        d_orig = o1.DistanceTo(o2)
+        if d_orig > 1e-9:
+            # Similitudine: traslazione + rotazione + scala uniforme
+            vo = o2 - o1; vn = n2 - n1
+            sc_f   = vn.Length / vo.Length if vo.Length > 1e-9 else 1.0
+            t_pre  = rg.Transform.Translation(rg.Point3d.Origin - o1)
+            ang    = rg.Vector3d.VectorAngle(vo, vn, rg.Plane.WorldXY)
+            t_rot  = rg.Transform.Rotation(ang, rg.Vector3d.ZAxis, rg.Point3d.Origin)
+            t_scl  = rg.Transform.Scale(rg.Point3d.Origin, sc_f)
+            t_post = rg.Transform.Translation(n1 - rg.Point3d.Origin)
+            xf = t_post * t_scl * t_rot * t_pre
+            nc.Transform(xf)
+    return nc, None
+
+
+def build_from_absolute(cells):
+    """
+    Fallback per curve senza UserText parametrico.
+    §14: Line(p1, p2).ToNurbsCurve()
+    """
+    try:
+        p1 = rg.Point3d(float(cells[C_X1]), float(cells[C_Y1]), 0.0)
+        p2 = rg.Point3d(float(cells[C_X2]), float(cells[C_Y2]), 0.0)
+        return rg.Line(p1, p2).ToNurbsCurve(), None
+    except Exception as ex:
+        return None, "absolute: %s" % ex
+
+
+def reconstruct(ut, cells, vd):
+    """
+    Dispatch principale.  Ordine di priorità:
+      _Line       → build_line  (+ fallback assoluto se fallisce)
+      _Arc        → build_arc
+      _InterpCrv / Nurbs grado2 con CtrlProp → build_conic
+      Nurbs con CtrlPoints                   → build_free
+      geom=Line senza UserText               → build_from_absolute
+    """
+    cmd       = ut.get("Comando", "")
+    tipo_orig = ut.get("Tipo_Originale", "")
+    geom      = cells[C_GEOM].strip() if len(cells) > C_GEOM else ""
+
+    # ── Linea retta ───────────────────────────────────────────────
+    if cmd == "_Line":
+        crv, err = build_line(ut, vd)
+        if crv is not None:
+            return crv, None
+        # Fallback assoluto se i parametri non si valutano
+        if geom == "Line":
+            return build_from_absolute(cells)
+        return None, err
+
+    # ── Arco ──────────────────────────────────────────────────────
+    if cmd == "_Arc" or tipo_orig == "Arc":
+        return build_arc(ut, vd)
+
+    # ── NURBS (conica o libera) ───────────────────────────────────
+    if cmd == "_InterpCrv" or tipo_orig == "Nurbs":
+        # Conica grado 2: ha CtrlProp_u/v/w
+        if ut.get("CtrlProp_u") is not None or ut.get("CtrlPeso_w") is not None:
+            return build_conic(ut, vd)
+        # NURBS libera: ha CtrlPoints
+        if ut.get("CtrlPoints"):
+            return build_free(ut, vd)
+        return None, "Nurbs: ne CtrlProp ne CtrlPoints"
+
+    # ── Fallback per qualsiasi geometria Line senza UserText ──────
+    if geom == "Line":
+        return build_from_absolute(cells)
+
+    return None, "tipo non gestito Cmd='%s' Geom='%s'" % (cmd, geom)
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Raccordi da Note di punto  (Nota=Raccordo Raggio N)
+#  Logica identica a PKG_Esegue_Parametrico: i punti con Nota
+#  descrivono angoli dove inserire un arco tangente di raggio R.
+# ═══════════════════════════════════════════════════════════════════
+
+def radius_from_note(note):
+    """
+    Estrae il raggio da una nota tipo 'Raccordo Raggio 5'.
+    Cerca l'ultimo token numerico positivo dopo 'Raggio'.
+    """
+    low = note.lower()
+    if "raccord" not in low or "raggio" not in low:
+        return None
+    for tok in reversed(note.replace(",", ".").split()):
+        try:
+            v = float(tok)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return None
+
+
+def collect_fillet_notes(rows):
+    """
+    Raccoglie i raccordi dai punti con Nota='Raccordo Raggio N'.
+    Ritorna lista di (X_param_str, Y_param_str, raggio_float).
+    La lista è vuota se nessun punto ha tale nota.
+    """
+    notes = []
+    for row in rows:
+        if len(row) < 6 or row[C_GEOM].strip() != "Point":
+            continue
+        ut   = parse_ut(row[-1])
+        nota = ut.get("Nota", "")
+        if not nota:
+            continue
+        R = radius_from_note(nota)
+        if R is None:
+            continue
+        xp = ut.get("X_param")
+        yp = ut.get("Y_param")
+        if xp and yp:
+            notes.append((xp.strip(), yp.strip(), R))
+    return notes
+
+
+def _other_end(crv, corner, tol=0.5):
+    """Ritorna l'estremo di crv lontano da corner."""
+    s = crv.PointAtStart
+    e = crv.PointAtEnd
+    return e if s.DistanceTo(corner) <= e.DistanceTo(corner) else s
+
+
+def fillet_line_line(c0, c1, corner, R, atol):
+    """
+    Raccordo esatto retta–retta: arco di raggio R tangente alle due rette,
+    con i segmenti accorciati ai punti di tangenza.
+    Ritorna [NurbsCurve_line0, NurbsCurve_arc, NurbsCurve_line1] o None.
+    Usa §14 Line.ToNurbsCurve() e §13 Arc.ToNurbsCurve().
+    """
+    oa = _other_end(c0, corner)
+    ob = _other_end(c1, corner)
+    dax = oa.X - corner.X;  day = oa.Y - corner.Y
+    dbx = ob.X - corner.X;  dby = ob.Y - corner.Y
+    la = math.sqrt(dax*dax + day*day)
+    lb = math.sqrt(dbx*dbx + dby*dby)
+    if la < 1e-9 or lb < 1e-9:
+        return None
+    dax /= la;  day /= la
+    dbx /= lb;  dby /= lb
+    cphi = max(-1.0, min(1.0, dax*dbx + day*dby))
+    phi  = math.acos(cphi)
+    if phi < 1e-4 or abs(phi - math.pi) < 1e-4:
+        return None                           # linee parallele o coincidenti
+    half = phi / 2.0
+    dt   = R / math.tan(half)
+    if dt >= la - 1e-6 or dt >= lb - 1e-6:
+        return None                           # raggio troppo grande
+    # Punti di tangenza
+    ta = rg.Point3d(corner.X + dax*dt, corner.Y + day*dt, 0.0)
+    tb = rg.Point3d(corner.X + dbx*dt, corner.Y + dby*dt, 0.0)
+    # Centro dell'arco
+    bx  = dax + dbx;  by = day + dby
+    bl  = math.sqrt(bx*bx + by*by)
+    if bl < 1e-9:
+        return None
+    bx /= bl;  by /= bl
+    cdist  = R / math.sin(half)
+    center = rg.Point3d(corner.X + bx*cdist, corner.Y + by*cdist, 0.0)
+    vx = corner.X - center.X;  vy = corner.Y - center.Y
+    vl = math.sqrt(vx*vx + vy*vy)
+    if vl < 1e-9:
+        return None
+    # Punto intermedio dell'arco (punto del centro verso l'angolo)
+    amid = rg.Point3d(center.X + vx/vl*R, center.Y + vy/vl*R, 0.0)
+    arc  = rg.Arc(ta, amid, tb)
+    if not arc.IsValid:
+        return None
+    # §14 + §13
+    return [
+        rg.Line(oa, ta).ToNurbsCurve(),
+        arc.ToNurbsCurve(),
+        rg.Line(ob, tb).ToNurbsCurve(),
+    ]
+
+
+def apply_fillets(real_list, fillet_notes, vd, atol, angtol):
+    """
+    Inserisce un raccordo per ogni nota. Per ogni angolo (X_param, Y_param, R):
+      1. Trova le due curve che terminano in quell'angolo (entro tolc)
+      2. Se entrambe sono linee rette: fillet_line_line esatto
+      3. Fallback: Rhino.Geometry.Curve.CreateFilletCurves
+      4. Sostituisce le due curve con [linea_troncata, arco, linea_troncata]
+    Ritorna (lista_aggiornata, n_applicati, n_falliti).
+    """
+    items  = list(real_list)   # copia mutabile di [(crv, layer_idx)]
+    tolc   = 0.25              # mm: raggio di ricerca vertice
+    n_ok   = 0
+    n_fail = 0
+
+    for xp, yp, R in fillet_notes:
+        cx = safe_eval(xp, vd)
+        cy = safe_eval(yp, vd)
+        if cx is None or cy is None:
+            n_fail += 1
+            continue
+        corner = rg.Point3d(cx, cy, 0.0)
+
+        # Trova indici delle curve che toccano questo angolo
+        hits = []
+        for idx, (crv, li) in enumerate(items):
+            if crv is None:
+                continue
+            try:
+                ds = crv.PointAtStart.DistanceTo(corner)
+                de = crv.PointAtEnd.DistanceTo(corner)
+                if min(ds, de) <= tolc:
+                    hits.append(idx)
+            except Exception:
+                pass
+
+        if len(hits) != 2:
+            n_fail += 1
+            continue
+
+        i0, i1 = hits[0], hits[1]
+        c0, lay = items[i0]
+        c1, _   = items[i1]
+        pieces  = None
+
+        # Tentativo 1: raccordo analitico linea–linea
+        try:
+            if c0.IsLinear(atol) and c1.IsLinear(atol):
+                pieces = fillet_line_line(c0, c1, corner, R, atol)
+        except Exception:
+            pieces = None
+
+        # Tentativo 2: CreateFilletCurves di RhinoCommon
+        if not pieces:
+            try:
+                res = Rhino.Geometry.Curve.CreateFilletCurves(
+                    c0, corner, c1, corner, R,
+                    False, True, False, atol, angtol)
+                if res:
+                    pieces = [rc for rc in res if rc is not None and rc.IsValid]
+            except Exception:
+                pieces = None
+
+        if not pieces:
+            n_fail += 1
+            continue
+
+        # Sostituisci le due curve originali con i pezzi del raccordo
+        for ix in sorted([i0, i1], reverse=True):
+            del items[ix]
+        for rc in pieces:
+            items.append((rc, lay))
+        n_ok += 1
+
+    return items, n_ok, n_fail
+
+
+# ═══════════════════════════════════════════════════════════════════
+#  Asse di specchiatura
+# ═══════════════════════════════════════════════════════════════════
 
 def make_mirror_xform(p1, p2):
-    """Specchiatura rispetto alla retta infinita passante per p1, p2 (piano XY)."""
+    """Specchiatura rispetto alla retta p1→p2 (piano XY)."""
     d = p2 - p1
     if d.Length < 1e-9:
         return None
     d.Unitize()
-    n = Vector3d.CrossProduct(d, Vector3d.ZAxis)
-    if n.Length < 1e-9:
-        return None
-    n.Unitize()
-    return Transform.Mirror(p1, n)
+    # Normale al piano di specchiatura (perpendicolare alla retta in XY)
+    n = rg.Vector3d(-d.Y, d.X, 0.0)
+    plane = rg.Plane(p1, n)
+    return rg.Transform.Mirror(plane)
 
 
-def similarity_xform(o1, o2, n1, n2):
-    """Similitudine (traslazione+rotazione+scala uniforme) che mappa
-    il segmento (o1,o2) sul segmento (n1,n2). Con variabili base e' identita'."""
-    vo = o2 - o1
-    vn = n2 - n1
-    lo = vo.Length
-    ln = vn.Length
-    if lo < 1e-9:
-        return Transform.Translation(n1 - o1)
-    t1 = Transform.Translation(Point3d.Origin - o1)
-    ang = Vector3d.VectorAngle(vo, vn, Plane.WorldXY)
-    rot = Transform.Rotation(ang, Vector3d.ZAxis, Point3d.Origin)
-    sc_f = ln / lo
-    scl = Transform.Scale(Point3d.Origin, sc_f)
-    t2 = Transform.Translation(n1 - Point3d.Origin)
-    return t2 * scl * rot * t1
+# ═══════════════════════════════════════════════════════════════════
+#  Layer e Tag
+# ═══════════════════════════════════════════════════════════════════
 
-
-# ---------------------------------------------------------------------------
-# Costruttori di geometria. Ognuno ritorna (curva_o_None, e_parametrica)
-# ---------------------------------------------------------------------------
-
-def make_nurbs(cps, deg, knots):
-    """NURBS razionale da control point (x,y,w) e nodi opzionali."""
-    n = len(cps)
-    if n < 2:
-        return None
-    if n < deg + 1:
-        deg = n - 1
-    order = deg + 1
-    nc = NurbsCurve(3, True, order, n)
-    kc = nc.Knots.Count
-    if knots is not None and len(knots) == kc:
-        for i in range(kc):
-            nc.Knots[i] = knots[i]
-    else:
-        for i in range(kc):
-            if i < deg:
-                nc.Knots[i] = 0.0
-            elif i >= kc - deg:
-                nc.Knots[i] = 1.0
-            else:
-                nc.Knots[i] = float(i - deg + 1)
-    for i in range(n):
-        x = cps[i][0]
-        y = cps[i][1]
-        w = cps[i][2]
-        if w is None:
-            w = 1.0
-        nc.Points.SetPoint(i, Point4d(x * w, y * w, 0.0, w))
-    if not nc.IsValid:
-        return None
-    return nc
-
-
-def build_point_map(rows):
-    """Mappa dei punti parametrici: (x_base, y_base, X_param, Y_param)
-    presi dalle righe Point del TXT. Serve a ricondurre a forma parametrica
-    gli estremi dei segmenti privi di P1_param/P2_param."""
-    pm = []
-    for row in rows:
-        if len(row) <= C_USER:
-            continue
-        if row[C_GEOM].strip() != "Point":
-            continue
-        ud = parse_userdict(row[C_USER])
-        xe = ud.get("X_param")
-        ye = ud.get("Y_param")
-        bx = col_f(row, C_X1)
-        by = col_f(row, C_Y1)
-        if xe and ye and bx is not None and by is not None:
-            pm.append((bx, by, xe, ye))
-    return pm
-
-
-def resolve_orphan(bx, by, V, pmap, tol=3.0):
-    """Per un estremo senza formula, trova il punto parametrico piu' vicino
-    (entro tol mm alle coordinate standard) e ne valuta la formula."""
-    best = None
-    bd = tol
-    for px, py, xe, ye in pmap:
-        dd = math.sqrt((px - bx) * (px - bx) + (py - by) * (py - by))
-        if dd <= bd:
-            bd = dd
-            best = (xe, ye)
-    if best is None:
-        return None
-    x = evf(best[0], V)
-    y = evf(best[1], V)
-    if x is None or y is None:
-        return None
-    return Point3d(x, y, 0.0)
-
-
-def endpoint(ud, key, row, ix, iy, V, pmap):
-    """Ritorna (Point3d, e_parametrico). Ordine: formula diretta ->
-    punto parametrico vicino (orfano risolto) -> coordinate fisse."""
-    p = parse_pair(ud.get(key), V)
-    if p is not None:
-        return p, True
-    bx = col_f(row, ix)
-    by = col_f(row, iy)
-    if bx is None or by is None:
-        return None, False
-    rp = resolve_orphan(bx, by, V, pmap)
-    if rp is not None:
-        return rp, True
-    return Point3d(bx, by, 0.0), False
-
-
-def build_line(ud, row, V, pmap):
-    p1, a1 = endpoint(ud, "P1_param", row, C_X1, C_Y1, V, pmap)
-    p2, a2 = endpoint(ud, "P2_param", row, C_X2, C_Y2, V, pmap)
-    if p1 is None or p2 is None:
-        return None, False
-    if p1.DistanceTo(p2) < 1e-9:
-        return None, False
-    return Line(p1, p2).ToNurbsCurve(), (a1 and a2)
-
-
-def build_arc(ud, row, V, pmap):
-    """Arco a raggio fisso con estremi parametrici. Lato del bulge dedotto
-    dalla geometria originale (Punto_medio). Semicerchi (sweep ~180) scalati
-    in raggio col raddoppio della corda per restare validi."""
-    p1, a1 = endpoint(ud, "P1_param", row, C_X1, C_Y1, V, pmap)
-    p2, a2 = endpoint(ud, "P2_param", row, C_X2, C_Y2, V, pmap)
-    if p1 is None or p2 is None:
-        return None, False
-    param = (a1 and a2)
-
-    o1 = col_pt(row, C_X1, C_Y1)
-    o2 = col_pt(row, C_X2, C_Y2)
-    omid = None
-    pm = ud.get("Punto_medio")
-    if pm:
-        sp = pm.split(",")
-        if len(sp) >= 2:
-            mx = to_float(sp[0])
-            my = to_float(sp[1])
-            if mx is not None and my is not None:
-                omid = Point3d(mx, my, 0.0)
-
-    R = to_float(ud.get("Raggio"))
-    if R is None:
-        R = col_f(row, C_R)
-
-    a0 = to_float(ud.get("AngStart_deg"))
-    a1 = to_float(ud.get("AngEnd_deg"))
-    sweep = None
-    if a0 is not None and a1 is not None:
-        sweep = abs(a1 - a0)
-
-    side = 1.0
-    if o1 is not None and o2 is not None and omid is not None:
-        vx = o2.X - o1.X
-        vy = o2.Y - o1.Y
-        wx = omid.X - o1.X
-        wy = omid.Y - o1.Y
-        cr = vx * wy - vy * wx
-        side = 1.0 if cr >= 0.0 else -1.0
-
-    chord = p1.DistanceTo(p2)
-    if chord < 1e-9:
-        return None, False
-    midx = (p1.X + p2.X) / 2.0
-    midy = (p1.Y + p2.Y) / 2.0
-    ux = (p2.X - p1.X) / chord
-    uy = (p2.Y - p1.Y) / chord
-    nx = -uy * side
-    ny = ux * side
-    half = chord / 2.0
-
-    is_semi = (sweep is not None and abs(sweep - 180.0) < 1.0)
-    if R is not None and abs(half - R) < 1e-3:
-        is_semi = True
-
-    if is_semi or R is None or R < half:
-        sagitta = half
-    else:
-        sagitta = R - math.sqrt(max(0.0, R * R - half * half))
-
-    pmid = Point3d(midx + nx * sagitta, midy + ny * sagitta, 0.0)
-    arc = Arc(p1, pmid, p2)
-    if not arc.IsValid:
-        return None, False
-    return arc.ToNurbsCurve(), param
-
-
-def build_conic(ud, row, V, pmap):
-    """Raccordo conico: NURBS grado 2, 3 CP. CP centrale come frazione (u,v)
-    del rettangolo degli estremi, con peso w. Pienamente parametrico."""
-    p1, a1 = endpoint(ud, "P1_param", row, C_X1, C_Y1, V, pmap)
-    p2, a2 = endpoint(ud, "P2_param", row, C_X2, C_Y2, V, pmap)
-    if p1 is None or p2 is None:
-        return None, False
-    param = (a1 and a2)
-
-    u = to_float(ud.get("CtrlProp_u"))
-    v = to_float(ud.get("CtrlProp_v"))
-    w = to_float(ud.get("CtrlPeso_w"))
-    if u is not None and v is not None and w is not None and w > 1e-9:
-        cx = p1.X + u * (p2.X - p1.X)
-        cy = p1.Y + v * (p2.Y - p1.Y)
-        nc = NurbsCurve(3, True, 3, 3)
-        for i in range(nc.Knots.Count):
-            nc.Knots[i] = 0.0 if i < 2 else 1.0
-        nc.Points.SetPoint(0, Point4d(p1.X, p1.Y, 0.0, 1.0))
-        nc.Points.SetPoint(1, Point4d(cx * w, cy * w, 0.0, w))
-        nc.Points.SetPoint(2, Point4d(p2.X, p2.Y, 0.0, 1.0))
-        if nc.IsValid:
-            return nc, param
-
-    # caso degenere / fallback: CP assoluti dalla colonna + similitudine
-    cps = parse_cp_col(row[C_CP]) if len(row) > C_CP else []
-    if len(cps) >= 3:
-        nc = make_nurbs(cps, 2, None)
-        if nc is not None:
-            o1 = Point3d(cps[0][0], cps[0][1], 0.0)
-            o2 = Point3d(cps[-1][0], cps[-1][1], 0.0)
-            nc.Transform(similarity_xform(o1, o2, p1, p2))
-            return nc, param
-    return None, False
-
-
-def build_free(ud, row, V, pmap):
-    """Curva libera (NURBS grado >2): ricostruita da CtrlPoints + Nodi assoluti,
-    poi similitudine sugli estremi parametrici per restare connessa."""
-    cpstr = ud.get("CtrlPoints")
-    if cpstr:
-        cps = parse_ctrlpoints(cpstr)
-    elif len(row) > C_CP:
-        cps = parse_cp_col(row[C_CP])
-    else:
-        cps = []
-    if len(cps) < 2:
-        return None, False
-
-    deg_v = to_float(ud.get("Grado"))
-    deg = int(deg_v) if deg_v is not None else (len(cps) - 1)
-    knots = parse_knots(ud.get("Nodi")) if ud.get("Nodi") else None
-
-    nc = make_nurbs(cps, deg, knots)
-    if nc is None:
-        return None, False
-
-    n1, a1 = endpoint(ud, "P1_param", row, C_X1, C_Y1, V, pmap)
-    n2, a2 = endpoint(ud, "P2_param", row, C_X2, C_Y2, V, pmap)
-    param = (a1 and a2)
-    if n1 is None:
-        n1 = Point3d(cps[0][0], cps[0][1], 0.0)
-    if n2 is None:
-        n2 = Point3d(cps[-1][0], cps[-1][1], 0.0)
-    o1 = Point3d(cps[0][0], cps[0][1], 0.0)
-    o2 = Point3d(cps[-1][0], cps[-1][1], 0.0)
-    nc.Transform(similarity_xform(o1, o2, n1, n2))
-    return nc, param
-
-
-# ---------------------------------------------------------------------------
-# Layer e attributi
-# ---------------------------------------------------------------------------
-
-def get_or_create_layer(nome, r, g, b):
-    idx = sc.doc.Layers.FindByFullPath(nome, -1)
+def get_or_create_layer(name, color):
+    idx = sc.doc.Layers.FindByFullPath(name, -1)
     if idx >= 0:
         return idx
-    layer = Rhino.DocObjects.Layer()
-    layer.Name = nome
-    layer.Color = System.Drawing.Color.FromArgb(r, g, b)
-    return sc.doc.Layers.Add(layer)
-
-
-def ensure_layers():
-    return {
-        "Taglio": get_or_create_layer("Taglio", 0, 0, 0),
-        "Cordone": get_or_create_layer("Cordone", 255, 0, 0),
-        "MezzoTaglio": get_or_create_layer("MezzoTaglio", 0, 170, 0),
-        "Foratore": get_or_create_layer("Foratore", 255, 140, 0),
-        "cyan": get_or_create_layer("PKG_Costruzione_Cyan", 0, 200, 200),
-        "points": get_or_create_layer("PKG_Punti_Parametrici", 128, 128, 128),
-    }
-
-
-def layer_for_tipo(tipo, layers):
-    if tipo == "C":
-        return layers["Cordone"]
-    if tipo == "M":
-        return layers["MezzoTaglio"]
-    if tipo == "F":
-        return layers["Foratore"]
-    return layers["Taglio"]
+    lyr = Rhino.DocObjects.Layer()
+    lyr.Name  = name
+    lyr.Color = color
+    return sc.doc.Layers.Add(lyr)
 
 
 def mk_attr(layer_idx):
     attr = Rhino.DocObjects.ObjectAttributes()
-    attr.LayerIndex = layer_idx
+    attr.LayerIndex  = layer_idx
     attr.ColorSource = Rhino.DocObjects.ObjectColorSource.ColorFromLayer
     attr.SetUserString(TAG_KEY, TAG_VAL)
     return attr
 
 
-def add_curve(crv, layer_idx, created):
-    gid = sc.doc.Objects.AddCurve(crv, mk_attr(layer_idx))
-    if gid != System.Guid.Empty:
-        created.append(gid)
-
-
-def add_point(pt, layer_idx, created):
-    gid = sc.doc.Objects.AddPoint(pt, mk_attr(layer_idx))
-    if gid != System.Guid.Empty:
-        created.append(gid)
-
-
 def clear_previous():
+    """Elimina tutti gli oggetti taggati con TAG_KEY=TAG_VAL."""
     st = Rhino.DocObjects.ObjectEnumeratorSettings()
     st.IncludeLights = False
-    st.IncludeGrips = False
-    ids = []
+    to_del = []
     for obj in sc.doc.Objects.GetObjectList(st):
         try:
             if obj.Attributes.GetUserString(TAG_KEY) == TAG_VAL:
-                ids.append(obj.Id)
-        except:
+                to_del.append(obj.Id)
+        except Exception:
             pass
-    for gid in ids:
+    for gid in to_del:
         sc.doc.Objects.Delete(gid, True)
-    return len(ids)
+    return len(to_del)
 
 
-# ---------------------------------------------------------------------------
-# Lettura file e persistenza variabili/opzioni
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════
+#  Lettura TXT
+# ═══════════════════════════════════════════════════════════════════
 
-def load_rows(path):
+def read_txt(path):
+    """
+    Legge il TXT (formato V5, 22 colonne).
+    Ritorna (rows_all, axis_data).
+    rows_all: lista di celle per ogni riga non-commento.
+    axis_data: (p1, p2) se trovato asse di specchiatura, else None.
+    """
     rows = []
     f = codecs.open(path, "r", "utf-8")
     try:
-        for line in f:
-            line = line.rstrip("\r\n")
-            if line == "" or line.startswith("#"):
+        for raw in f:
+            line = raw.rstrip("\r\n")
+            if not line or line.startswith("#"):
                 continue
             rows.append(line.split("\t"))
     finally:
@@ -709,551 +1132,217 @@ def load_rows(path):
     return rows
 
 
-def load_defaults():
-    vals = {}
-    for k in VARORDER:
-        s = sc.doc.Strings.GetValue(k)
-        v = to_float(s) if s is not None else None
-        vals[k] = v if v is not None else DEFAULTS[k]
-    return vals
-
-
-def save_vals(vals):
-    for k in VARORDER:
-        sc.doc.Strings.SetString(k, ("%g" % vals[k]))
-
-
-def load_opts(opts):
-    o = dict(opts)
-    for k in OPTKEYS:
-        s = sc.doc.Strings.GetValue(OPTKEYS[k])
-        if s is not None:
-            o[k] = (s == "1")
-    return o
-
-
-def save_opts(opts):
-    for k in OPTKEYS:
-        sc.doc.Strings.SetString(OPTKEYS[k], "1" if opts[k] else "0")
-
-
-def pick_file():
-    dlg = Rhino.UI.OpenFileDialog()
-    dlg.Title = "Scegli il file TXT parametrico"
-    dlg.Filter = "File parametrico (*.txt)|*.txt|Tutti i file (*.*)|*.*"
-    if dlg.ShowOpenDialog():
-        return dlg.FileName
-    return None
-
-
-# ---------------------------------------------------------------------------
-# Ricostruzione completa
-# ---------------------------------------------------------------------------
-
-def radius_from_note(note):
-    """Estrae il raggio da una nota tipo 'Raccordo Raggio 5' / 'Raccorda Raggio 10'."""
-    low = note.lower()
-    if "raccord" not in low or "raggio" not in low:
-        return None
-    for tok in reversed(note.replace(",", ".").split()):
-        v = to_float(tok)
-        if v is not None and v > 0:
-            return v
-    return None
-
-
-def _other_end(crv, corner):
-    s = crv.PointAtStart
-    e = crv.PointAtEnd
-    if s.DistanceTo(corner) <= e.DistanceTo(corner):
-        return e
-    return s
-
-
-def fillet_line_line(c0, c1, corner, R):
-    """Raccordo esatto retta-retta: arco di raggio R tangente, con le due
-    rette accorciate ai punti di tangenza. Ritorna [retta0, arco, retta1]."""
-    oa = _other_end(c0, corner)
-    ob = _other_end(c1, corner)
-    dax = oa.X - corner.X
-    day = oa.Y - corner.Y
-    dbx = ob.X - corner.X
-    dby = ob.Y - corner.Y
-    la = math.sqrt(dax * dax + day * day)
-    lb = math.sqrt(dbx * dbx + dby * dby)
-    if la < 1e-9 or lb < 1e-9:
-        return None
-    dax /= la
-    day /= la
-    dbx /= lb
-    dby /= lb
-    cphi = dax * dbx + day * dby
-    if cphi > 1.0:
-        cphi = 1.0
-    if cphi < -1.0:
-        cphi = -1.0
-    phi = math.acos(cphi)
-    if phi < 1e-4 or abs(phi - math.pi) < 1e-4:
-        return None
-    half = phi / 2.0
-    dt = R / math.tan(half)
-    if dt >= la - 1e-6 or dt >= lb - 1e-6:
-        return None
-    ta = Point3d(corner.X + dax * dt, corner.Y + day * dt, 0.0)
-    tb = Point3d(corner.X + dbx * dt, corner.Y + dby * dt, 0.0)
-    bx = dax + dbx
-    by = day + dby
-    bl = math.sqrt(bx * bx + by * by)
-    if bl < 1e-9:
-        return None
-    bx /= bl
-    by /= bl
-    cdist = R / math.sin(half)
-    center = Point3d(corner.X + bx * cdist, corner.Y + by * cdist, 0.0)
-    vx = corner.X - center.X
-    vy = corner.Y - center.Y
-    vl = math.sqrt(vx * vx + vy * vy)
-    if vl < 1e-9:
-        return None
-    amid = Point3d(center.X + vx / vl * R, center.Y + vy / vl * R, 0.0)
-    arc = Arc(ta, amid, tb)
-    if not arc.IsValid:
-        return None
-    out = []
-    out.append(Line(oa, ta).ToNurbsCurve())
-    out.append(arc.ToNurbsCurve())
-    out.append(Line(ob, tb).ToNurbsCurve())
-    return out
-
-
-def apply_fillets(real, fillet_notes, V):
-    """Inserisce un raccordo dove le note lo indicano. Ritorna
-    (nuova_lista_curve, n_applicati, n_falliti)."""
-    items = []
-    for c, li in real:
-        items.append([c, li])
-    applied = 0
-    failed = 0
-    tolc = 0.2
-    atol = sc.doc.ModelAbsoluteTolerance
-    angtol = sc.doc.ModelAngleToleranceRadians
-    for xp, yp, R in fillet_notes:
-        cx = evf(xp, V)
-        cy = evf(yp, V)
-        if cx is None or cy is None:
+def find_axis(rows):
+    """
+    Cerca la linea di costruzione con UserText chiave 'A' (es. 'A=').
+    Ritorna (p1, p2) o None.
+    """
+    for row in rows:
+        if len(row) < 6:
             continue
-        corner = Point3d(cx, cy, 0.0)
-        hits = []
-        for idx in range(len(items)):
-            crv = items[idx][0]
-            if crv is None:
-                continue
-            d = min(crv.PointAtStart.DistanceTo(corner),
-                    crv.PointAtEnd.DistanceTo(corner))
-            if d <= tolc:
-                hits.append(idx)
-        if len(hits) != 2:
-            failed += 1
-            continue
-        i0 = hits[0]
-        i1 = hits[1]
-        c0 = items[i0][0]
-        c1 = items[i1][0]
-        lay = items[i0][1]
-        pieces = None
-        if c0.IsLinear(atol) and c1.IsLinear(atol):
-            pieces = fillet_line_line(c0, c1, corner, R)
-        if pieces is None:
+        ut = parse_ut(row[-1])
+        if "A" in ut:
             try:
-                res = Rhino.Geometry.Curve.CreateFilletCurves(
-                    c0, corner, c1, corner, R, False, True, False, atol, angtol)
-                if res and len(res) > 0:
-                    pieces = []
-                    for rc in res:
-                        if rc is not None and rc.IsValid:
-                            pieces.append(rc)
-            except:
-                pieces = None
-        if not pieces:
-            failed += 1
-            continue
-        for ix in sorted([i0, i1], reverse=True):
-            del items[ix]
-        for rc in pieces:
-            items.append([rc, lay])
-        applied += 1
-    out = []
-    for c, li in items:
-        out.append((c, li))
-    return out, applied, failed
+                p1 = rg.Point3d(float(row[C_X1]), float(row[C_Y1]), 0.0)
+                p2 = rg.Point3d(float(row[C_X2]), float(row[C_Y2]), 0.0)
+                return (p1, p2)
+            except Exception:
+                pass
+    return None
 
 
-def reconstruct(rows, V, opts, layers, pmap):
-    del EVAL_ERRORS[:]
-    created = []
-    fallbacks = []
-    real = []
-    pts = []
-    fillet_notes = []
-    axis_seg = None
-    axis_curve = None
-    counts = {"line": 0, "arc": 0, "conic": 0, "free": 0,
-              "T": 0, "C": 0, "M": 0, "F": 0, "axis": 0, "pt": 0,
-              "param": 0, "fixed": 0, "snapped": 0,
-              "fillet": 0, "fillet_fail": 0}
+# ═══════════════════════════════════════════════════════════════════
+#  Generazione in Rhino
+# ═══════════════════════════════════════════════════════════════════
+
+def generate(rows, vd, opts, axis_data, fillet_notes):
+    """Ricostruisce e inserisce le curve nel documento Rhino."""
+    if opts["clear"]:
+        n_del = clear_previous()
+        if n_del:
+            print("Eliminati %d oggetti precedenti." % n_del)
+
+    # Layer cache
+    layer_cache = {}
+    def layer_idx(name):
+        if name not in layer_cache:
+            col = LAYER_COLORS.get(name, LAYER_COLORS["Predefinito"])
+            layer_cache[name] = get_or_create_layer(name, col)
+        return layer_cache[name]
+
+    # Transform di specchiatura
+    mirror_xf = None
+    if opts["mirror"] and axis_data is not None:
+        mirror_xf = make_mirror_xform(axis_data[0], axis_data[1])
+
+    # ── PASSO 1: costruzione curve ─────────────────────────────────
+    real_list = []   # [(crv, layer_idx), ...]
+    axis_crvs = []   # asse di costruzione (separato)
+    n_abs     = 0
+    reasons   = {}
 
     for row in rows:
-        if len(row) < 5:
+        if len(row) < 6:
             continue
-        tipo = row[C_TIPO].strip()
-        geom = row[C_GEOM].strip()
-        udstr = row[C_USER] if len(row) > C_USER else ""
-        ud = parse_userdict(udstr) if udstr else {}
-        is_axis = ("A" in ud)
+        tipo       = row[C_TIPO]
+        if tipo == "P":
+            continue
+        layer_name = row[C_LAYER] if len(row) > C_LAYER else "Taglio"
+        ut         = parse_ut(row[-1])
 
-        if geom == "Point":
-            if tipo == "P":
-                note = ud.get("Nota")
-                if note:
-                    rr = radius_from_note(note)
-                    if rr is not None and ud.get("X_param") and ud.get("Y_param"):
-                        fillet_notes.append((ud["X_param"], ud["Y_param"], rr))
-            if opts["points"] and tipo == "P":
-                xp = ud.get("X_param")
-                yp = ud.get("Y_param")
-                if xp and yp:
-                    x = evf(xp, V)
-                    y = evf(yp, V)
-                    if x is not None and y is not None:
-                        pts.append(Point3d(x, y, 0.0))
-                        counts["pt"] += 1
+        # Asse di costruzione: separato
+        if "A" in ut:
+            if opts["axis"]:
+                crv, _ = build_from_absolute(row)
+                if crv:
+                    axis_crvs.append((crv, layer_idx("PKG_Costruzione_Cyan")))
             continue
 
-        crv = None
-        is_param = False
-        kind = None
-        if geom == "Line":
-            crv, is_param = build_line(ud, row, V, pmap)
-            kind = "line"
-        elif geom == "Arc":
-            crv, is_param = build_arc(ud, row, V, pmap)
-            kind = "arc"
-        elif geom == "Nurbs":
-            if "CtrlPoints" in ud:
-                crv, is_param = build_free(ud, row, V, pmap)
-                kind = "free"
-            elif ("CtrlProp_u" in ud) or ("CtrlProp_v" in ud):
-                crv, is_param = build_conic(ud, row, V, pmap)
-                kind = "conic"
-            else:
-                crv, is_param = build_free(ud, row, V, pmap)
-                kind = "free"
-        else:
-            continue
-
+        crv, err = reconstruct(ut, row, vd)
         if crv is None:
+            reasons[err] = reasons.get(err, 0) + 1
             continue
 
-        if is_axis:
-            p1 = parse_pair(ud.get("P1_param"), V)
-            p2 = parse_pair(ud.get("P2_param"), V)
-            if p1 is None:
-                p1 = col_pt(row, C_X1, C_Y1)
-            if p2 is None:
-                p2 = col_pt(row, C_X2, C_Y2)
-            if p1 is not None and p2 is not None:
-                axis_seg = (p1, p2)
-            axis_curve = crv
-            counts["axis"] += 1
-            continue
+        if not ut.get("Comando") and not ut.get("P1_param"):
+            n_abs += 1
 
-        if not is_param:
-            fallbacks.append(row[C_ID])
-            counts["fixed"] += 1
-        else:
-            counts["param"] += 1
-            if ud.get("P1_param") is None or ud.get("P2_param") is None:
-                counts["snapped"] += 1
+        real_list.append((crv, layer_idx(layer_name)))
 
-        counts[kind] = counts.get(kind, 0) + 1
-        li = layer_for_tipo(tipo, layers)
-        real.append((crv, li))
-        tkey = tipo if tipo in ("T", "C", "M", "F") else "T"
-        counts[tkey] = counts.get(tkey, 0) + 1
-
+    # ── PASSO 2: raccordi ──────────────────────────────────────────
+    n_fillet_ok   = 0
+    n_fillet_fail = 0
     if opts.get("fillets") and fillet_notes:
-        real, counts["fillet"], counts["fillet_fail"] = apply_fillets(
-            real, fillet_notes, V)
+        atol   = sc.doc.ModelAbsoluteTolerance
+        angtol = sc.doc.ModelAngleToleranceRadians
+        real_list, n_fillet_ok, n_fillet_fail = apply_fillets(
+            real_list, fillet_notes, vd, atol, angtol)
 
-    mirror_xf = None
-    if opts["mirror"] and axis_seg is not None:
-        mirror_xf = make_mirror_xform(axis_seg[0], axis_seg[1])
+    # ── PASSO 3: inserimento in Rhino ──────────────────────────────
+    created = []
+    n_ok    = 0
 
-    for crv, li in real:
-        add_curve(crv, li, created)
+    # Asse di costruzione
+    for crv, li in axis_crvs:
+        gid = sc.doc.Objects.AddCurve(crv, mk_attr(li))
+        if gid != System.Guid.Empty:
+            created.append(gid)
 
-    nmir = 0
-    if mirror_xf is not None:
-        for crv, li in real:
-            c2 = crv.DuplicateCurve()
-            c2.Transform(mirror_xf)
-            add_curve(c2, li, created)
-            nmir += 1
-
-    npts = 0
-    if pts:
-        pli = layers["points"]
-        for p in pts:
-            add_point(p, pli, created)
-            npts += 1
-        if mirror_xf is not None:
-            for p in pts:
-                p2 = Point3d(p)
-                p2.Transform(mirror_xf)
-                add_point(p2, pli, created)
-                npts += 1
-
-    if opts["axis"] and axis_curve is not None:
-        add_curve(axis_curve, layers["cyan"], created)
-
-    return created, counts, nmir, npts, fallbacks, (axis_seg is not None)
-
-
-def report(vals, counts, nmir, npts, fb, has_axis, opts, ntot):
-    print("=== PKG Parametrico ===")
-    print("Variabili: L=%g P=%g A=%g S=%g C=%g E=%g T=%g"
-          % (vals["L"], vals["P"], vals["A"], vals["S"],
-             vals["C"], vals["E"], vals["T"]))
-    print("Curve: Taglio=%d Cordone=%d MezzoTaglio=%d Foratore=%d"
-          % (counts.get("T", 0), counts.get("C", 0),
-             counts.get("M", 0), counts.get("F", 0)))
-    print("Geometrie: linee=%d archi=%d conici=%d libere=%d"
-          % (counts.get("line", 0), counts.get("arc", 0),
-             counts.get("conic", 0), counts.get("free", 0)))
-    print("Ricostruzione: parametriche=%d (di cui orfani risolti=%d)  a coordinate fisse=%d"
-          % (counts.get("param", 0), counts.get("snapped", 0), counts.get("fixed", 0)))
-    if has_axis:
-        if opts["mirror"]:
-            print("Asse cyan trovato: tracciato specchiato (%d curve)." % nmir)
+    # Curve principali (+ specchiatura)
+    for crv, li in real_list:
+        attr = mk_attr(li)
+        gid  = sc.doc.Objects.AddCurve(crv, attr)
+        if gid != System.Guid.Empty:
+            created.append(gid)
+            n_ok += 1
+            if mirror_xf is not None:
+                crv2 = crv.DuplicateCurve()
+                crv2.Transform(mirror_xf)
+                gid2 = sc.doc.Objects.AddCurve(crv2, mk_attr(li))
+                if gid2 != System.Guid.Empty:
+                    created.append(gid2)
         else:
-            print("Asse cyan trovato (specchiatura disattivata).")
-    else:
-        print("Nessun asse cyan (UserText 'A=') trovato: nessuna specchiatura.")
-    if counts.get("fillet", 0) or counts.get("fillet_fail", 0):
-        msg = "Raccordi da note inseriti: %d" % counts.get("fillet", 0)
-        if counts.get("fillet_fail", 0):
-            msg += " (non riusciti: %d - raggio incompatibile o punto ambiguo)" % counts.get("fillet_fail", 0)
-        print(msg)
-    if npts:
-        print("Punti parametrici: %d" % npts)
-    if fb:
-        print("NOTA: %d segmenti senza formula nel TXT, a coordinate fisse (ID: %s)."
-              % (len(fb), ", ".join(fb)))
-    if EVAL_ERRORS:
-        print("ATTENZIONE: %d formule NON interpretate. Esempi:" % len(EVAL_ERRORS))
-        seen = []
-        for ex, msg in EVAL_ERRORS:
-            if ex in seen:
-                continue
-            seen.append(ex)
-            print("   '%s'  ->  %s" % (ex, msg))
-            if len(seen) >= 5:
-                break
-    print("Totale oggetti generati: %d" % ntot)
+            reasons["AddCurve fallita"] = reasons.get("AddCurve fallita", 0) + 1
+
+    # Raggruppa tutto
+    if created:
+        grp = sc.doc.Groups.Add()
+        for gid in created:
+            sc.doc.Groups.AddToGroup(grp, gid)
+
+    sc.doc.Views.Redraw()
+
+    # ── Report ─────────────────────────────────────────────────────
+    print("\n" + "─" * 60)
+    print("Curve generate:   %d" % n_ok)
+    if mirror_xf is not None:
+        print("  + specchiate:  %d  (tot. con mirror: %d)" % (n_ok, n_ok * 2))
+    if n_abs:
+        print("  di cui %d da coordinate assolute (non parametriche)" % n_abs)
+    if n_fillet_ok or n_fillet_fail:
+        if n_fillet_fail:
+            print("Raccordi: %d applicati  (%d falliti: raggio incompatibile o angolo ambiguo)" % (
+                  n_fillet_ok, n_fillet_fail))
+        else:
+            print("Raccordi: %d applicati" % n_fillet_ok)
+    print("Layer: %s" % ", ".join(sorted(layer_cache)))
+    if reasons:
+        n_fail = sum(reasons.values())
+        print("Non generate: %d" % n_fail)
+        for k, v in sorted(reasons.items(), key=lambda x: -x[1]):
+            print("  [%d] %s" % (v, k))
+    print("Fatto.")
 
 
-# ---------------------------------------------------------------------------
-# Interfaccia: dialogo variabili (Eto) con fallback a console
-# ---------------------------------------------------------------------------
-
-def get_inputs_eto(vals, opts):
-    F = _ETOF
-    D = _ETOD
-
-    class Dlg(F.Dialog[bool]):
-        def __init__(self):
-            self.Title = "PKG Parametrico - Variabili"
-            self.Padding = D.Padding(12)
-            self.Resizable = False
-            self.action = "close"
-            self.result_vals = dict(vals)
-            self.result_opts = dict(opts)
-            self.tb = {}
-
-            labels = {"L": "L   lunghezza", "P": "P   profondita",
-                      "A": "A   altezza", "S": "S   spessore",
-                      "C": "C   patella", "E": "E   smusso",
-                      "T": "T   lembo"}
-
-            lay = F.DynamicLayout()
-            lay.Spacing = D.Size(8, 6)
-            for k in VARORDER:
-                t = F.TextBox()
-                t.Text = ("%g" % vals[k])
-                t.Width = 110
-                self.tb[k] = t
-                lbl = F.Label()
-                lbl.Text = labels[k]
-                lbl.VerticalAlignment = F.VerticalAlignment.Center
-                lay.AddRow(lbl, t)
-
-            self.cb_mirror = F.CheckBox()
-            self.cb_mirror.Text = "Specchia sull'asse cyan"
-            self.cb_mirror.Checked = opts["mirror"]
-            self.cb_axis = F.CheckBox()
-            self.cb_axis.Text = "Disegna asse di costruzione (cyan)"
-            self.cb_axis.Checked = opts["axis"]
-            self.cb_points = F.CheckBox()
-            self.cb_points.Text = "Disegna punti parametrici"
-            self.cb_points.Checked = opts["points"]
-            self.cb_clear = F.CheckBox()
-            self.cb_clear.Text = "Cancella ricostruzione precedente"
-            self.cb_clear.Checked = opts["clear"]
-            self.cb_fillet = F.CheckBox()
-            self.cb_fillet.Text = "Inserisci raccordi (da note)"
-            self.cb_fillet.Checked = opts.get("fillets", True)
-
-            lay.AddRow(None)
-            lay.AddRow(self.cb_mirror)
-            lay.AddRow(self.cb_axis)
-            lay.AddRow(self.cb_points)
-            lay.AddRow(self.cb_fillet)
-            lay.AddRow(self.cb_clear)
-            lay.AddRow(None)
-
-            b_apply = F.Button()
-            b_apply.Text = "Applica"
-            b_close = F.Button()
-            b_close.Text = "Chiudi"
-            b_apply.Click += self.on_apply
-            b_close.Click += self.on_close
-
-            brow = F.DynamicLayout()
-            brow.Spacing = D.Size(8, 0)
-            brow.AddRow(None, b_apply, b_close)
-            lay.AddRow(brow)
-
-            self.Content = lay
-            self.DefaultButton = b_apply
-            self.AbortButton = b_close
-
-        def on_apply(self, s, e):
-            self.action = "apply"
-            for k in self.tb:
-                fv = to_float_input(self.tb[k].Text)
-                if fv is not None:
-                    self.result_vals[k] = fv
-            self.result_opts["mirror"] = bool(self.cb_mirror.Checked)
-            self.result_opts["axis"] = bool(self.cb_axis.Checked)
-            self.result_opts["points"] = bool(self.cb_points.Checked)
-            self.result_opts["clear"] = bool(self.cb_clear.Checked)
-            self.result_opts["fillets"] = bool(self.cb_fillet.Checked)
-            self.Close(True)
-
-        def on_close(self, s, e):
-            self.action = "close"
-            self.Close(False)
-
-    dlg = Dlg()
-    try:
-        dlg.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow)
-    except:
-        dlg.ShowModal()
-    return dlg.action, dlg.result_vals, dlg.result_opts
-
-
-def ask_yn(prompt, default):
-    gs = Rhino.Input.Custom.GetString()
-    gs.SetCommandPrompt(prompt + " (s/n)")
-    gs.SetDefaultString("s" if default else "n")
-    gs.AcceptNothing(True)
-    gs.Get()
-    if gs.CommandResult() != Rhino.Commands.Result.Success:
-        return default
-    v = gs.StringResult().strip().lower()
-    if v == "":
-        return default
-    return v.startswith("s") or v.startswith("y")
-
-
-def get_inputs_console(vals, opts):
-    out = dict(vals)
-    for k in VARORDER:
-        gn = Rhino.Input.Custom.GetNumber()
-        gn.SetCommandPrompt("Valore %s" % k)
-        gn.SetDefaultNumber(float(vals[k]))
-        gn.AcceptNothing(True)
-        gn.Get()
-        if gn.CommandResult() != Rhino.Commands.Result.Success:
-            return "close", out, opts
-        out[k] = float(gn.Number())
-    o = dict(opts)
-    o["mirror"] = ask_yn("Specchia sull'asse cyan?", opts["mirror"])
-    o["axis"] = ask_yn("Disegna asse cyan?", opts["axis"])
-    o["points"] = ask_yn("Disegna punti parametrici?", opts["points"])
-    o["clear"] = ask_yn("Cancella ricostruzione precedente?", opts["clear"])
-    o["fillets"] = ask_yn("Inserisci raccordi dalle note?", opts.get("fillets", True))
-    return "apply", out, o
-
-
-def get_inputs(vals, opts):
-    if HAS_ETO:
-        try:
-            return get_inputs_eto(vals, opts)
-        except:
-            return get_inputs_console(vals, opts)
-    return get_inputs_console(vals, opts)
-
-
-# ---------------------------------------------------------------------------
-# Main
-# ---------------------------------------------------------------------------
+# ═══════════════════════════════════════════════════════════════════
+#  Main
+# ═══════════════════════════════════════════════════════════════════
 
 def main():
-    layers = ensure_layers()
+    print("=" * 60)
+    print("PKG_Genera_Da_TXT  v%s" % _VERSION)
+    print("=" * 60)
 
-    path = pick_file()
-    if not path:
-        print("Nessun file selezionato.")
+    # 1 ── Scelta file (PRIMA del dialog parametri)
+    fd = Rhino.UI.OpenFileDialog()
+    fd.Filter = "PKG Text (*.txt)|*.txt"
+    fd.Title  = "Seleziona il file TXT parametrico"
+    if not fd.ShowOpenDialog():
+        print("Annullato.")
+        return
+    path = fd.FileName
+    print("\nFile: %s" % os.path.basename(path))
+
+    # 2 ── Lettura e parsing
+    try:
+        rows = read_txt(path)
+    except Exception as ex:
+        print("[ERRORE] Lettura: %s" % ex)
+        return
+    print("Righe lette: %d" % len(rows))
+
+    # 3 ── Derivazione automatica dei parametri
+    derived = derive_vars(rows)
+    if derived:
+        print("Parametri derivati: " + "  ".join(
+            "%s=%g" % (k, derived[k]) for k in VAR_NAMES if k in derived))
+    else:
+        print("Parametri non derivabili, uso default.")
+
+    # Merge con default per eventuali variabili non trovate
+    defaults = dict(DEFAULTS)
+    defaults.update(derived)
+
+    # 4 ── Asse di specchiatura
+    axis_data = find_axis(rows)
+    if axis_data:
+        print("Asse di specchiatura trovato.")
+
+    # 5 ── Raccordi da Note di punto
+    fillet_notes = collect_fillet_notes(rows)
+    if fillet_notes:
+        print("Raccordi da Note: %d angoli trovati." % len(fillet_notes))
+
+    # 6 ── Preview curves
+    preview_curves = build_preview_curves(rows)
+
+    # 7 ── Dialog con preview
+    dlg = _DlgParams(defaults, preview_curves,
+                     has_axis=(axis_data is not None),
+                     has_fillets=(len(fillet_notes) > 0))
+    if dlg.ShowDialog() != WF.DialogResult.OK:
+        print("Annullato.")
         return
 
-    rows = load_rows(path)
-    if not rows:
-        print("File vuoto o illeggibile.")
+    vd = dlg.get_values()
+    if vd is None:
         return
-    pmap = build_point_map(rows)
+    opts = dlg.get_opts()
 
-    vals = load_defaults()
-    opts = {"mirror": True, "axis": True, "points": False,
-            "clear": True, "fillets": True}
-    opts = load_opts(opts)
+    print("\nParametri scelti: " + "  ".join(
+          "%s=%g" % (k, vd[k]) for k in VAR_NAMES))
 
-    while True:
-        action, vals, opts = get_inputs(vals, opts)
-        if action != "apply":
-            break
-
-        if opts["clear"]:
-            clear_previous()
-
-        created, counts, nmir, npts, fb, has_axis = reconstruct(
-            rows, vals, opts, layers, pmap)
-
-        if created:
-            grp = sc.doc.Groups.Add()
-            for gid in created:
-                sc.doc.Groups.AddToGroup(grp, gid)
-
-        save_vals(vals)
-        save_opts(opts)
-        sc.doc.Views.Redraw()
-        report(vals, counts, nmir, npts, fb, has_axis, opts, len(created))
-
-        if not HAS_ETO:
-            if not ask_yn("Ripetere con altri valori?", False):
-                break
-
-    print("Terminato.")
+    # 8 ── Generazione
+    generate(rows, vd, opts, axis_data, fillet_notes)
 
 
 if __name__ == "__main__":
