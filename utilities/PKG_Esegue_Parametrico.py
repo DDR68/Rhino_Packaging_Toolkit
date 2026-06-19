@@ -1,7 +1,7 @@
 #! python 2
 # -*- coding: utf-8 -*-
 """
-PKG_Esegue_Parametrico.py   v2.1
+PKG_Genera_Da_TXT.py   v2.1
 Rhino 7/8  |  IronPython 2.7  |  RhinoCommon
 
 Workflow:
@@ -59,8 +59,9 @@ LAYER_COLORS = {
 
 # Colori preview
 _COL_TAGLIO  = SD.Color.Black
-_COL_CORDONE = SD.Color.FromArgb(255, 0, 0)
-_COL_OTHER   = SD.Color.FromArgb(70, 130, 180)
+_COL_CORDONE = SD.Color.FromArgb(255,   0,   0)
+_COL_AXIS    = SD.Color.FromArgb(  0, 200, 200)   # Cyan: asse specchiatura
+_COL_OTHER   = SD.Color.FromArgb( 70, 130, 180)
 
 ALLOWED_FUNCS = {
     "abs":  abs,  "sqrt": math.sqrt,
@@ -233,6 +234,13 @@ def build_preview_curves(rows):
         geom = row[C_GEOM].strip()
         ut   = parse_ut(row[-1])
 
+        # Asse di specchiatura → tipo "X" per colore Cyan nel preview
+        if "A" in ut:
+            p1s = ut.get("P1_param"); p2s = ut.get("P2_param")
+            if p1s and p2s:
+                result.append(("X", "line", ut))
+            continue   # non aggiungere come curva normale
+
         has_p1 = bool(ut.get("P1_param"))
         has_p2 = bool(ut.get("P2_param"))
         tipo_orig = ut.get("Tipo_Originale", "")
@@ -241,6 +249,8 @@ def build_preview_curves(rows):
         if has_p1 and has_p2:
             if tipo_orig == "Nurbs" or cmd == "_InterpCrv":
                 result.append((tipo, "conic", ut))
+            elif tipo_orig == "Arc" or cmd == "_Arc":
+                result.append((tipo, "arc", ut))
             else:
                 result.append((tipo, "line", ut))
         elif geom == "Line":
@@ -303,11 +313,12 @@ def draw_preview(g, curves, vd, W, H):
 
     pen_T = SD.Pen(_COL_TAGLIO,  1.0)
     pen_C = SD.Pen(_COL_CORDONE, 1.0)
+    pen_X = SD.Pen(_COL_AXIS,    1.0)   # Cyan: asse specchiatura
     pen_O = SD.Pen(_COL_OTHER,   1.0)
 
     try:
         for tipo, geom, data in curves:
-            pen = pen_T if tipo == "T" else (pen_C if tipo == "C" else pen_O)
+            pen = pen_T if tipo == "T" else (pen_C if tipo == "C" else (pen_X if tipo == "X" else pen_O))
 
             if geom == "line":
                 ut = data
@@ -324,21 +335,27 @@ def draw_preview(g, curves, vd, W, H):
                 p2 = eval_pt(ut.get("P2_param"), vd)
                 if p1 and p2:
                     try:
-                        fu = float(ut.get("CtrlProp_u", "0"))
-                        fv = float(ut.get("CtrlProp_v", "0"))
-                        dx = p2.X - p1.X
-                        dy = p2.Y - p1.Y
+                        fu  = float(ut.get("CtrlProp_u", "0"))
+                        fv  = float(ut.get("CtrlProp_v", "0"))
+                        fw  = float(ut.get("CtrlPeso_w", "1.0"))
+                        if fw < 1e-9:
+                            fw = 1.0
+                        dx  = p2.X - p1.X
+                        dy  = p2.Y - p1.Y
                         cpx = p1.X + fu * dx
                         cpy = p1.Y + fv * dy
-                        # Bezier quadratico approssimato con 10 segmenti
-                        N = 10
+                        # Bezier RAZIONALE grado 2: pesi [1, fw, 1]
+                        # Per fw=1 il denominatore = 1 → coincide col non-razionale
+                        # Per fw<1 (archi circolari) corregge il rigonfiamento
+                        N = 12
                         prev = sc(p1.X, p1.Y)
                         for i in range(1, N + 1):
-                            t = i / float(N)
-                            mt = 1.0 - t
-                            bx = mt*mt*p1.X + 2*mt*t*cpx + t*t*p2.X
-                            by = mt*mt*p1.Y + 2*mt*t*cpy + t*t*p2.Y
-                            curr = sc(bx, by)
+                            t   = i / float(N)
+                            mt  = 1.0 - t
+                            wx  = mt*mt*p1.X + 2.0*mt*t*cpx*fw + t*t*p2.X
+                            wy  = mt*mt*p1.Y + 2.0*mt*t*cpy*fw + t*t*p2.Y
+                            w   = mt*mt       + 2.0*mt*t*fw     + t*t
+                            curr = sc(wx / w, wy / w)
                             g.DrawLine(pen, int(prev[0]), int(prev[1]),
                                        int(curr[0]), int(curr[1]))
                             prev = curr
@@ -346,6 +363,37 @@ def draw_preview(g, curves, vd, W, H):
                         ax, ay = sc(p1.X, p1.Y)
                         bx, by = sc(p2.X, p2.Y)
                         g.DrawLine(pen, int(ax), int(ay), int(bx), int(by))
+
+            elif geom == "arc":
+                ut = data
+                p1 = eval_pt(ut.get("P1_param"), vd)
+                p2 = eval_pt(ut.get("P2_param"), vd)
+                if p1 and p2:
+                    centro = eval_pt(ut.get("Centro_param"), vd)
+                    if centro:
+                        r = math.sqrt((p1.X-centro.X)**2+(p1.Y-centro.Y)**2)
+                        if r > 1e-9:
+                            verso  = ut.get("Verso", "CCW")
+                            ang1   = math.atan2(p1.Y-centro.Y, p1.X-centro.X)
+                            ang2   = math.atan2(p2.Y-centro.Y, p2.X-centro.X)
+                            if verso == "CCW":
+                                span = ang2 - ang1
+                                if span <= 0: span += 2.0*math.pi
+                            else:
+                                span = ang1 - ang2
+                                if span <= 0: span += 2.0*math.pi
+                                span = -span
+                            N    = 16
+                            prev = sc(p1.X, p1.Y)
+                            for i in range(1, N + 1):
+                                t   = i / float(N)
+                                ang = ang1 + t * span
+                                px  = centro.X + r * math.cos(ang)
+                                py  = centro.Y + r * math.sin(ang)
+                                curr = sc(px, py)
+                                g.DrawLine(pen, int(prev[0]), int(prev[1]),
+                                           int(curr[0]), int(curr[1]))
+                                prev = curr
 
             elif geom == "abs":
                 x1, y1, x2, y2 = data
@@ -356,6 +404,7 @@ def draw_preview(g, curves, vd, W, H):
     finally:
         pen_T.Dispose()
         pen_C.Dispose()
+        pen_X.Dispose()
         pen_O.Dispose()
 
 
@@ -386,7 +435,7 @@ class _DlgParams(WF.Form):
         self._preview_bmp    = None
 
         # ── Form ──────────────────────────────────────────────────
-        FORM_W, FORM_H = 548, 448
+        FORM_W, FORM_H = 548, 500
         self.Text            = u"PKG \u2013 Genera Da TXT   v%s" % _VERSION
         self.FormBorderStyle = WF.FormBorderStyle.FixedDialog
         self.MaximizeBox     = False
@@ -478,7 +527,7 @@ class _DlgParams(WF.Form):
         PX  = 240          # preview origin X
         PY  = 10
         PW  = FORM_W - PX - 10
-        PH  = FORM_H - 80
+        PH  = FORM_H - 130  # spazio per legenda + pulsanti
 
         lbl_prev = WF.Label()
         lbl_prev.Text      = "Preview"
@@ -497,28 +546,59 @@ class _DlgParams(WF.Form):
         self._pb.SizeMode    = WF.PictureBoxSizeMode.Normal
         self.Controls.Add(self._pb)
 
-        # Legenda preview: due label colorati
-        half_W = PW // 2
-        lbl_tag = WF.Label()
-        lbl_tag.Text      = u"\u25a0 Taglio"
-        lbl_tag.Font      = SD.Font("Segoe UI", 7.5)
-        lbl_tag.ForeColor = SD.Color.Black
-        lbl_tag.Location  = SD.Point(PX, PY + 18 + PH + 2)
-        lbl_tag.Size      = SD.Size(half_W, 14)
-        lbl_tag.TextAlign = SD.ContentAlignment.MiddleRight
-        self.Controls.Add(lbl_tag)
+        # Legenda preview: 2 o 3 voci a seconda della presenza dell'asse
+        leg_y = PY + 18 + PH + 2
+        leg_font = SD.Font("Segoe UI", 7.5)
+        if has_axis:
+            third_W = PW // 3
+            lbl_tag = WF.Label()
+            lbl_tag.Text      = u"\u25a0 Taglio"
+            lbl_tag.Font      = leg_font
+            lbl_tag.ForeColor = SD.Color.Black
+            lbl_tag.Location  = SD.Point(PX, leg_y)
+            lbl_tag.Size      = SD.Size(third_W, 14)
+            lbl_tag.TextAlign = SD.ContentAlignment.MiddleCenter
+            self.Controls.Add(lbl_tag)
 
-        lbl_cord = WF.Label()
-        lbl_cord.Text      = u"\u25a0 Cordone"
-        lbl_cord.Font      = SD.Font("Segoe UI", 7.5)
-        lbl_cord.ForeColor = SD.Color.FromArgb(255, 0, 0)
-        lbl_cord.Location  = SD.Point(PX + half_W + 8, PY + 18 + PH + 2)
-        lbl_cord.Size      = SD.Size(PW - half_W - 8, 14)
-        lbl_cord.TextAlign = SD.ContentAlignment.MiddleLeft
-        self.Controls.Add(lbl_cord)
+            lbl_cord = WF.Label()
+            lbl_cord.Text      = u"\u25a0 Cordone"
+            lbl_cord.Font      = leg_font
+            lbl_cord.ForeColor = SD.Color.FromArgb(255, 0, 0)
+            lbl_cord.Location  = SD.Point(PX + third_W, leg_y)
+            lbl_cord.Size      = SD.Size(third_W, 14)
+            lbl_cord.TextAlign = SD.ContentAlignment.MiddleCenter
+            self.Controls.Add(lbl_cord)
+
+            lbl_ax = WF.Label()
+            lbl_ax.Text      = u"\u25a0 Asse"
+            lbl_ax.Font      = leg_font
+            lbl_ax.ForeColor = SD.Color.FromArgb(0, 200, 200)
+            lbl_ax.Location  = SD.Point(PX + 2 * third_W, leg_y)
+            lbl_ax.Size      = SD.Size(PW - 2 * third_W, 14)
+            lbl_ax.TextAlign = SD.ContentAlignment.MiddleCenter
+            self.Controls.Add(lbl_ax)
+        else:
+            half_W = PW // 2
+            lbl_tag = WF.Label()
+            lbl_tag.Text      = u"\u25a0 Taglio"
+            lbl_tag.Font      = leg_font
+            lbl_tag.ForeColor = SD.Color.Black
+            lbl_tag.Location  = SD.Point(PX, leg_y)
+            lbl_tag.Size      = SD.Size(half_W, 14)
+            lbl_tag.TextAlign = SD.ContentAlignment.MiddleRight
+            self.Controls.Add(lbl_tag)
+
+            lbl_cord = WF.Label()
+            lbl_cord.Text      = u"\u25a0 Cordone"
+            lbl_cord.Font      = leg_font
+            lbl_cord.ForeColor = SD.Color.FromArgb(255, 0, 0)
+            lbl_cord.Location  = SD.Point(PX + half_W + 8, leg_y)
+            lbl_cord.Size      = SD.Size(PW - half_W - 8, 14)
+            lbl_cord.TextAlign = SD.ContentAlignment.MiddleLeft
+            self.Controls.Add(lbl_cord)
 
         # ── Pulsanti ───────────────────────────────────────────────
-        BY = FORM_H - 42
+        BY = FORM_H - 54   # pulsanti sempre visibili
         btn_ok = WF.Button()
         btn_ok.Text         = "Genera"
         btn_ok.DialogResult = WF.DialogResult.OK
@@ -674,18 +754,56 @@ def build_conic(ut, vd):
     return nc, None
 
 
+def _arc_pmid(p1, p2, centro, r, verso):
+    """
+    Calcola il punto medio di un arco dalla convenzione CW/CCW.
+    Ritorna (Point3d_pmid, span_signed) o None.
+    """
+    ang1 = math.atan2(p1.Y - centro.Y, p1.X - centro.X)
+    ang2 = math.atan2(p2.Y - centro.Y, p2.X - centro.X)
+    if verso == "CCW":
+        span = ang2 - ang1
+        if span <= 0:
+            span += 2.0 * math.pi
+        amiddle = ang1 + span / 2.0
+    else:                       # CW
+        span = ang1 - ang2
+        if span <= 0:
+            span += 2.0 * math.pi
+        amiddle = ang1 - span / 2.0
+    pmx = centro.X + r * math.cos(amiddle)
+    pmy = centro.Y + r * math.sin(amiddle)
+    return rg.Point3d(pmx, pmy, 0.0), (-span if verso == "CW" else span)
+
+
 def build_arc(ut, vd):
     """
-    Arco da tre punti: start, Punto_medio, end  (§13 ironpython-examples.md).
-    Il Punto_medio determina univocamente il lato e il verso; non ci sono
-    ambiguità di piano/segno. Fallback: centro geometrico + raggio + angoli.
+    Arco parametrico.  Priorità:
+      1. Centro_param (valutato con vd) + raggio da |P1-Centro| + pmid da CCW/CW
+      2. Punto_medio fisso dal TXT (fallback)
+      3. Centro_geom assoluto + Circle+Interval (ultimo fallback)
     """
     p1 = eval_pt(ut.get("P1_param"), vd)
     p2 = eval_pt(ut.get("P2_param"), vd)
     if p1 is None or p2 is None:
         return None, "arc: P1/P2 non valutabili"
 
-    # Via canonica: tre punti (start, mid, end)
+    verso = ut.get("Verso", "CCW")
+
+    # ── Approccio 1: centro parametrico + raggio + pmid calcolato ─────
+    centro = eval_pt(ut.get("Centro_param"), vd)
+    if centro is not None:
+        r = math.sqrt((p1.X - centro.X) ** 2 + (p1.Y - centro.Y) ** 2)
+        if r > 1e-9:
+            p_mid, _ = _arc_pmid(p1, p2, centro, r, verso)
+            try:
+                arc = rg.Arc(p1, p_mid, p2)
+                if arc.IsValid:
+                    return arc.ToNurbsCurve(), None
+            except Exception:
+                pass
+
+    # ── Approccio 2: Punto_medio fisso dal TXT ─────────────────────────
     pm_str = ut.get("Punto_medio")
     if pm_str:
         try:
@@ -698,30 +816,26 @@ def build_arc(ut, vd):
         except Exception:
             pass
 
-    # Fallback: centro geometrico + raggio + angoli
+    # ── Approccio 3: Centro_geom assoluto + Circle+Interval ────────────
     cg = ut.get("Centro_geom")
-    if not cg:
-        return None, "arc: ne Punto_medio ne Centro_geom"
-    try:
-        cx, cy = float(cg.split(",")[0]), float(cg.split(",")[1])
-        r      = float(ut.get("Raggio", "0"))
-        a0     = math.radians(float(ut.get("AngStart_deg", "0")))
-        a1     = math.radians(float(ut.get("AngEnd_deg",   "0")))
-    except Exception as ex:
-        return None, "arc: dati geometrici mancanti (%s)" % ex
-    verso  = ut.get("Verso", "CCW")
-    normal = rg.Vector3d(0, 0, -1) if verso == "CW" else rg.Vector3d(0, 0, 1)
-    plane  = rg.Plane(rg.Point3d(cx, cy, 0.0), normal)
-    iv     = rg.Interval(abs(a0), abs(a1))
-    if iv.Length < 1e-9:
-        iv = rg.Interval(0.0, 2.0 * math.pi)
-    try:
-        arc = rg.Arc(rg.Circle(plane, r), iv)
-        if arc.IsValid:
-            return arc.ToNurbsCurve(), None
-    except Exception as ex:
-        pass
-    return None, "arc: costruzione fallita"
+    if cg:
+        try:
+            cx, cy = float(cg.split(",")[0]), float(cg.split(",")[1])
+            r_num  = float(ut.get("Raggio", "0"))
+            a0     = math.radians(float(ut.get("AngStart_deg", "0")))
+            a1     = math.radians(float(ut.get("AngEnd_deg",   "0")))
+            normal = rg.Vector3d(0, 0, -1) if verso == "CW" else rg.Vector3d(0, 0, 1)
+            plane  = rg.Plane(rg.Point3d(cx, cy, 0.0), normal)
+            iv     = rg.Interval(abs(a0), abs(a1))
+            if iv.Length < 1e-9:
+                iv = rg.Interval(0.0, 2.0 * math.pi)
+            arc = rg.Arc(rg.Circle(plane, r_num), iv)
+            if arc.IsValid:
+                return arc.ToNurbsCurve(), None
+        except Exception:
+            pass
+
+    return None, "arc: tutti gli approcci falliti"
 
 
 def build_free(ut, vd):
@@ -1117,7 +1231,7 @@ def read_txt(path):
     Legge il TXT (formato V5, 22 colonne).
     Ritorna (rows_all, axis_data).
     rows_all: lista di celle per ogni riga non-commento.
-    axis_data: (p1, p2) se trovato asse di specchiatura, else None.
+    axis_data: (cells, ut_dict) se trovato asse, else None.
     """
     rows = []
     f = codecs.open(path, "r", "utf-8")
@@ -1134,21 +1248,39 @@ def read_txt(path):
 
 def find_axis(rows):
     """
-    Cerca la linea di costruzione con UserText chiave 'A' (es. 'A=').
-    Ritorna (p1, p2) o None.
+    Cerca la linea con UserText chiave 'A' (es. 'A=').
+    Ritorna (cells, ut_dict) per consentire la valutazione parametrica,
+    o None se non trovata.
     """
     for row in rows:
         if len(row) < 6:
             continue
         ut = parse_ut(row[-1])
         if "A" in ut:
-            try:
-                p1 = rg.Point3d(float(row[C_X1]), float(row[C_Y1]), 0.0)
-                p2 = rg.Point3d(float(row[C_X2]), float(row[C_Y2]), 0.0)
-                return (p1, p2)
-            except Exception:
-                pass
+            return (row, ut)
     return None
+
+
+def eval_axis(axis_data, vd):
+    """
+    Valuta gli estremi dell'asse con i parametri correnti (vd).
+    Tenta prima P1_param/P2_param (parametrico), poi fallback assoluto.
+    Ritorna (Point3d, Point3d) o None.
+    """
+    if axis_data is None:
+        return None
+    row, ut = axis_data
+    p1 = eval_pt(ut.get("P1_param"), vd)
+    p2 = eval_pt(ut.get("P2_param"), vd)
+    if p1 is not None and p2 is not None:
+        return (p1, p2)
+    # Fallback: coordinate assolute dal TXT
+    try:
+        p1 = rg.Point3d(float(row[C_X1]), float(row[C_Y1]), 0.0)
+        p2 = rg.Point3d(float(row[C_X2]), float(row[C_Y2]), 0.0)
+        return (p1, p2)
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1170,10 +1302,11 @@ def generate(rows, vd, opts, axis_data, fillet_notes):
             layer_cache[name] = get_or_create_layer(name, col)
         return layer_cache[name]
 
-    # Transform di specchiatura
+    # Transform di specchiatura (valutato con i parametri correnti)
     mirror_xf = None
-    if opts["mirror"] and axis_data is not None:
-        mirror_xf = make_mirror_xform(axis_data[0], axis_data[1])
+    axis_pts = eval_axis(axis_data, vd)
+    if opts["mirror"] and axis_pts is not None:
+        mirror_xf = make_mirror_xform(axis_pts[0], axis_pts[1])
 
     # ── PASSO 1: costruzione curve ─────────────────────────────────
     real_list = []   # [(crv, layer_idx), ...]
@@ -1192,10 +1325,13 @@ def generate(rows, vd, opts, axis_data, fillet_notes):
 
         # Asse di costruzione: separato
         if "A" in ut:
-            if opts["axis"]:
-                crv, _ = build_from_absolute(row)
-                if crv:
+            if opts["axis"] and axis_pts is not None:
+                # Linea Cyan parametrica: usa i punti valutati con vd
+                try:
+                    crv = rg.Line(axis_pts[0], axis_pts[1]).ToNurbsCurve()
                     axis_crvs.append((crv, layer_idx("PKG_Costruzione_Cyan")))
+                except Exception:
+                    pass
             continue
 
         crv, err = reconstruct(ut, row, vd)
