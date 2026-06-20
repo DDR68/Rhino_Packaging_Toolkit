@@ -424,7 +424,7 @@ class _DlgParams(WF.Form):
         ("S", "Spessore cartone  S",   "S"),
         (None, None, None),
         ("C", "Aletta incollaggio  C", "C"),
-        ("T", "Tuck  T",     "T"),
+        ("T", "Aletta  T",     "T"),
         ("E", "Bisello  E",      "E"),
     ]
 
