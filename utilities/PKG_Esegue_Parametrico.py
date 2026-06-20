@@ -418,14 +418,14 @@ class _DlgParams(WF.Form):
     Carica i default già derivati dal TXT. Supporta asse/specchiatura.
     """
     _FIELDS = [
-        ("L", "Larghezza pannello  L", "L"),
-        ("P", "Profondita\u2019  P",   "P"),
+        ("L", "Larghezza  L", "L"),
+        ("P", "Profondita  P",   "P"),
         ("A", "Altezza  A",            "A"),
         ("S", "Spessore cartone  S",   "S"),
         (None, None, None),
         ("C", "Aletta incollaggio  C", "C"),
-        ("T", "Lock inferiore  T",     "T"),
-        ("E", "Smusso angoli  E",      "E"),
+        ("T", "Tuck  T",     "T"),
+        ("E", "Bisello  E",      "E"),
     ]
 
     def __init__(self, defaults, preview_curves, has_axis=False, has_fillets=False):
