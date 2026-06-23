@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 Script: Esporta_Geometrie_Parametrico.py
-Versione: 5.3
+Versione: 5.5
 Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscriptsyntax)
 
 UNIFICA:
@@ -20,6 +20,55 @@ AGGIUNTE (robustezza e usabilita'):
   - [Prompt LLM] Opzione (checkbox nel dialogo) per anteporre al TXT un
     prompt che istruisce un LLM a generare lo script parametrico dai dati.
     Il file diventa autoportante (istruzioni + dati). Vedi _llm_prompt_header.
+
+NOVITA V.5.5 rispetto a V.5.4:
+  - [Membership dai GRUPPI Rhino] La membership delle specchiature ora deriva
+    dai gruppi Rhino (_Group): ogni gruppo che contiene una linea cyan definisce
+    un PASSO; la linea cyan ne e' l'asse e ne fissa il tipo. Un oggetto puo'
+    appartenere a piu' gruppi: e' cosi' che si rappresentano le MATRIOSKE
+    (annidamento). La vecchia UserString 'Blocco' resta come FALLBACK quando
+    nella selezione non ci sono gruppi Rhino.
+  - [Colonna Blocco = lista passi] Per ogni curva la colonna Blocco contiene
+    ora la LISTA (CSV) dei passi a cui partecipa (es. '1,2'): una curva interna
+    compare in piu' passi perche' il passo esterno la rispecchia di nuovo. Per
+    le linee-asse la colonna contiene il passo che definiscono.
+  - [Ordine = annidamento] I passi sono ordinati dal piu' INTERNO (meno membri)
+    al piu' ESTERNO (piu' membri); a parita', le patelle (tratteggiate) prima
+    della simmetria (continua). Coerente col modello matrioska confermato:
+    il passo esterno riflette anche i risultati dei passi interni.
+  - [Riepilogo a 'Passi'] Il riepilogo in testa al TXT elenca i Passi con
+    ordine, tipo d'asse, forma parametrica e n. membri, e dichiara la regola
+    matrioska. Aggiornato anche il prompt LLM.
+  - [Diagnostica] La diagnostica mostra ora, per ogni linea cyan/lineare, i
+    gruppi Rhino di appartenenza e i passi calcolati. Avviso se una linea asse
+    e' priva di gruppo (non entra nell'ordine di specchiatura).
+
+NOVITA V.5.4 rispetto a V.5.3:
+  - [Specchiatura: continua vs tratteggiata] L'asse cyan di un blocco e' ora
+    classificato per TIPO DI LINEA:
+      * linea CONTINUA  -> asse di SIMMETRIA: le geometrie vengono riflesse e
+        gli originali RESTANO (scatola intera). Ruolo TXT: AsseSpecchio_Continuo.
+      * linea TRATTEGGIATA -> asse di PATELLA: le geometrie vengono riflesse e
+        gli originali vengono CANCELLATI (vive solo la copia). Ruolo TXT:
+        AsseSpecchio_Tratteggiato.
+    Il tipo di linea e' riconosciuto dalla STRUTTURA del pattern (SegmentCount/
+    PatternLength del Linetype effettivo, per-oggetto o per-layer), NON dal nome:
+    robusto a lingua, template e file di terzi. Indice -1 o linetype continuo del
+    documento = continuo; qualsiasi pattern con segmenti = tratteggiato.
+  - [Esecuzione sequenziale annidata] I blocchi sono "matrioske": eseguiti uno
+    alla volta in ordine crescente di numero, dal piu' interno (patelle,
+    tratteggiate) al piu' esterno (simmetria finale, continua). Ogni blocco N
+    opera su TUTTO cio' che esiste dopo i blocchi 1..N-1. Il numero di blocco e'
+    l'ordine di esecuzione e va ricordato passo per passo. Nessuna diramazione:
+    la sequenza e' lineare.
+  - [Errore bloccante] Se un blocco contiene per errore SIA una linea continua
+    SIA una tratteggiata, l'export viene ABORTITO (nessun file scritto) con un
+    messaggio chiaro: un blocco ammette un solo asse.
+  - [Report] Conteggio delle curve selezionate prive di 'Blocco' quando la
+    specchiatura e' in uso (segnala possibili annotazioni mancanti).
+  - [Prompt LLM] Riscritte le sezioni sugli assi e sulla specchiatura per
+    distinguere patella (cancella origine) da simmetria (mantiene origine) e per
+    imporre l'esecuzione sequenziale accumulativa in ordine di blocco.
 
 NOVITA V.5.3 rispetto a V.5.2:
   - [Specchiatura] L'export riconosce i BLOCCHI DI SPECCHIATURA: gli oggetti
@@ -136,7 +185,13 @@ MIRROR_BLOCK_KEY = "Blocco"
 # Ruolo emesso nel TXT sulla linea d'asse (per l'LLM: non e' geometria da
 # tracciare, e' solo l'asse di riflessione).
 MIRROR_ROLE_KEY  = "Ruolo"
-MIRROR_AXIS_ROLE = "AsseSpecchio"
+MIRROR_AXIS_ROLE = "AsseSpecchio"           # ruolo generico (retrocompat.)
+
+# v5.4: ruoli distinti per tipo di linea dell'asse cyan.
+#   continua    -> simmetria: riflette e MANTIENE gli originali (scatola intera)
+#   tratteggiata-> patella:   riflette e CANCELLA gli originali (vive la copia)
+AXIS_ROLE_CONTINUOUS = "AsseSpecchio_Continuo"
+AXIS_ROLE_DASHED     = "AsseSpecchio_Tratteggiato"
 
 # La linea di specchiatura e' riconosciuta dal COLORE cyan (0,255,255), per
 # oggetto o per layer. Tolleranza per-canale ampia ma sicura (il blu 0,0,255
@@ -155,7 +210,7 @@ def show_help():
     import Eto.Drawing as ed
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.3 - Guida"
+    dlg.Title = "Esporta Geometrie Parametrico v5.5 - Guida"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(680, 560)
     dlg.Resizable = True
@@ -165,7 +220,7 @@ def show_help():
     layout.DefaultSpacing = ed.Size(4, 4)
 
     title = ef.Label()
-    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.3"
+    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.5"
     title.Font = ed.Font(ed.SystemFont.Bold, 13)
     layout.AddRow(title)
     layout.AddRow(ef.Label(Text=""))
@@ -220,19 +275,21 @@ def show_help():
     layout.AddRow(ef.Label(Text=""))
 
     sec_mir = ef.Label()
-    sec_mir.Text = "SPECCHIATURA (v5.3)"
+    sec_mir.Text = "SPECCHIATURA (v5.5)"
     sec_mir.Font = ed.Font(ed.SystemFont.Bold, 11)
     layout.AddRow(sec_mir)
 
     mir = ef.Label()
     mir.Text = ("Gli oggetti con UserString 'Blocco'=N formano un blocco\n"
-                "(N e' anche l'ordine di esecuzione). Dentro il blocco, la\n"
-                "linea CYAN e' l'asse di specchiatura. L'export raggruppa per\n"
-                "blocco, marca l'asse con Ruolo=AsseSpecchio e ne riassume gli\n"
-                "estremi (anche parametrici) in testa al TXT. Lo script\n"
-                "parametrico generato riflette ogni blocco sul suo asse, in\n"
-                "ordine, poi cancella l'asse (di servizio); per la scatola\n"
-                "intera origine e copia restano entrambe.")
+                "(N e' anche l'ordine di esecuzione, dal piu' interno al\n"
+                "piu' esterno). Dentro il blocco, la linea CYAN e' l'asse:\n"
+                "  - CONTINUA    -> simmetria: riflette e MANTIENE l'origine\n"
+                "  - TRATTEGGIATA-> patella:  riflette e CANCELLA l'origine\n"
+                "L'export marca l'asse con Ruolo=AsseSpecchio_Continuo o\n"
+                "AsseSpecchio_Tratteggiato e riassume i blocchi in testa al\n"
+                "TXT. I blocchi si eseguono in ordine: ognuno opera su tutto\n"
+                "cio' che esiste fino a quel punto. Un blocco con DUE tipi di\n"
+                "asse (continuo+tratteggiato) e' un errore: export annullato.")
     layout.AddRow(mir)
     layout.AddRow(ef.Label(Text=""))
 
@@ -274,7 +331,7 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     result = {"export": False, "include_prompt": True}
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.3 - Report"
+    dlg.Title = "Esporta Geometrie Parametrico v5.5 - Report"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(480, 320)
     dlg.Resizable = False
@@ -1059,15 +1116,63 @@ def _effective_color(obj):
     return attr.ObjectColor
 
 
+def _show_blocking_error(messages):
+    """Mostra un message box con gli errori bloccanti della specchiatura.
+    Guardato da try: se la UI non e' disponibile, resta il print su console."""
+    try:
+        body = ("Export annullato.\n\nConflitto sugli assi di "
+                "specchiatura:\n\n- " + "\n- ".join(messages) +
+                "\n\nUn blocco ammette UN solo asse: linea continua "
+                "(simmetria) OPPURE tratteggiata (patella).")
+        Rhino.UI.Dialogs.ShowMessage(
+            body, "Esporta Geometrie Parametrico v5.5 - Errore")
+    except Exception:
+        pass
+
+
 def _is_cyan(color):
+    """True se il colore e' cyan. Test assoluto (entro CYAN_CH_TOL da
+    0,255,255) con fallback RELAZIONALE: rosso basso, verde e blu alti e
+    simili tra loro. Cosi' riconosce anche tonalita' di cyan non perfette."""
+    r, g, b = int(color.R), int(color.G), int(color.B)
     cr, cg, cb = COLOR_CYAN_RGB
-    return (abs(int(color.R) - cr) <= CYAN_CH_TOL and
-            abs(int(color.G) - cg) <= CYAN_CH_TOL and
-            abs(int(color.B) - cb) <= CYAN_CH_TOL)
+    if (abs(r - cr) <= CYAN_CH_TOL and
+            abs(g - cg) <= CYAN_CH_TOL and
+            abs(b - cb) <= CYAN_CH_TOL):
+        return True
+    if r < 110 and g > 140 and b > 140 and abs(g - b) <= 90:
+        return True
+    return False
+
+
+def _linear_tol():
+    """Tolleranza per il test di linearita': tolleranza del documento, con
+    un minimo prudente. Piu' permissiva di ZeroTolerance (che scartava
+    segmenti tratteggiati/polilinee non perfettamente rettilinei)."""
+    try:
+        return max(sc.doc.ModelAbsoluteTolerance, 0.001)
+    except Exception:
+        return 0.001
+
+
+def _is_linear_curve(g):
+    """True se la geometria e' una curva lineare (entro _linear_tol)."""
+    if not isinstance(g, rg.Curve):
+        return False
+    try:
+        if g.IsLinear(_linear_tol()):
+            return True
+    except Exception:
+        pass
+    try:
+        return g.IsLinear()
+    except Exception:
+        return False
 
 
 def _block_number(obj):
-    """Numero di blocco dell'oggetto (UserString MIRROR_BLOCK_KEY) o ''."""
+    """Numero di blocco dell'oggetto (UserString MIRROR_BLOCK_KEY) o ''.
+    Fallback usato solo quando nella selezione non ci sono gruppi Rhino."""
     try:
         v = obj.Attributes.GetUserString(MIRROR_BLOCK_KEY)
     except Exception:
@@ -1075,58 +1180,308 @@ def _block_number(obj):
     return (v or "").strip()
 
 
-def _is_cyan_axis_line(obj):
-    """True se l'oggetto e' una linea (curva lineare) di colore cyan: l'asse
-    di specchiatura del suo blocco."""
+def _object_groups(obj):
+    """Lista degli indici dei gruppi Rhino a cui l'oggetto appartiene (puo'
+    appartenere a piu' gruppi: e' cosi' che si modellano le matrioske)."""
+    try:
+        arr = obj.Attributes.GetGroupList()
+    except Exception:
+        arr = None
+    if not arr:
+        return []
+    out = []
+    for x in arr:
+        try:
+            out.append(int(x))
+        except Exception:
+            pass
+    return out
+
+
+def _selection_has_groups(objs):
+    """True se almeno un oggetto della selezione appartiene a un gruppo Rhino."""
+    for obj in objs:
+        if _object_groups(obj):
+            return True
+    return False
+
+
+def _effective_linetype_index(obj):
+    """Indice del linetype EFFETTIVO dell'oggetto: per-oggetto se la sorgente
+    e' 'da oggetto', altrimenti quello del layer. Speculare a _effective_color.
+    Ritorna un intero (puo' essere -1 = default/continuo)."""
+    attr = obj.Attributes
+    try:
+        src = attr.LinetypeSource
+    except Exception:
+        return attr.LinetypeIndex
+    if src == rd.ObjectLinetypeSource.LinetypeFromLayer:
+        try:
+            return sc.doc.Layers[attr.LayerIndex].LinetypeIndex
+        except Exception:
+            return -1
+    # LinetypeFromObject e LinetypeFromParent: usa l'indice dell'oggetto
+    return attr.LinetypeIndex
+
+
+def _is_continuous_linetype(idx):
+    """True se il linetype di indice 'idx' e' CONTINUO. Il giudizio si basa
+    sulla STRUTTURA del pattern, non sul nome (robusto a lingua/template):
+      - idx < 0                         -> default = continuo
+      - idx == ContinuousLinetypeIndex  -> continuo del documento
+      - linetype senza segmenti / pattern nullo -> continuo
+    Qualsiasi pattern con segmenti (dash, dash-dot, ...) e' NON continuo, e
+    in questo script viene trattato come TRATTEGGIATO (patella)."""
+    if idx < 0:
+        return True
+    try:
+        if idx == sc.doc.Linetypes.ContinuousLinetypeIndex:
+            return True
+    except Exception:
+        pass
+    try:
+        lt = sc.doc.Linetypes[idx]
+    except Exception:
+        lt = None
+    if lt is None:
+        return True
+    try:
+        if lt.SegmentCount == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        if lt.PatternLength <= 0.0:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+def _cyan_axis_role(obj):
+    """Se l'oggetto e' una LINEA cyan (asse di specchiatura), ritorna il ruolo
+    in base al tipo di linea: AXIS_ROLE_CONTINUOUS (simmetria, origine resta)
+    oppure AXIS_ROLE_DASHED (patella, origine cancellata). Ritorna None se
+    l'oggetto NON e' una linea cyan."""
     g = obj.Geometry
-    if not isinstance(g, rg.Curve):
-        return False
-    if not g.IsLinear(Rhino.RhinoMath.ZeroTolerance):
-        return False
-    return _is_cyan(_effective_color(obj))
+    if not _is_linear_curve(g):
+        return None
+    if not _is_cyan(_effective_color(obj)):
+        return None
+    idx = _effective_linetype_index(obj)
+    if _is_continuous_linetype(idx):
+        return AXIS_ROLE_CONTINUOUS
+    return AXIS_ROLE_DASHED
 
 
-def _resolve_mirror_blocks(objs):
-    """Raggruppa gli oggetti per numero di blocco e, in ogni blocco, individua
-    la linea cyan come asse. Ritorna (block_of, axis_ids, blocks):
-      block_of : { obj.Id(str) : numero }
-      axis_ids : set( obj.Id(str) ) delle linee-asse scelte
-      blocks   : { numero : {"members":[obj], "axis":obj|None} }
+def _linetype_debug(obj):
+    """Ritorna (nome, segmenti, lunghezza_pattern, continuo?) del linetype
+    effettivo: usato dalla diagnostica per spiegare le classificazioni."""
+    idx = _effective_linetype_index(obj)
+    name, seg, plen = "?", "?", "?"
+    try:
+        if idx < 0:
+            name = "(default/continuo)"
+        else:
+            lt = sc.doc.Linetypes[idx]
+            name = lt.Name
+            try:
+                seg = str(lt.SegmentCount)
+            except Exception:
+                pass
+            try:
+                plen = "%.3f" % lt.PatternLength
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return name, seg, plen, _is_continuous_linetype(idx)
+
+
+def _resolve_mirror_steps(objs):
+    """Determina i PASSI di specchiatura. Meccanismo primario: i GRUPPI Rhino
+    (_Group). Ogni gruppo che contiene una linea cyan definisce un passo; la
+    linea cyan ne e' l'asse e ne fissa il tipo (continua=simmetria, origine
+    mantenuta; tratteggiata=patella, origine cancellata). Un oggetto puo'
+    stare in piu' gruppi: e' cosi' che si annidano le matrioske.
+
+    Ordine di esecuzione: dal passo piu' INTERNO (meno membri) al piu'
+    ESTERNO (piu' membri); a parita', le patelle prima della simmetria.
+    Per le matrioske i membri del passo interno sono un sottoinsieme di
+    quelli del passo esterno, quindi il passo esterno li rispecchia di nuovo.
+
+    Fallback retrocompatibile: se nella selezione NON ci sono gruppi Rhino,
+    si usa la vecchia UserString 'Blocco' (numero = passo).
+
+    Ritorna (step_list_of, steps, errors, warns):
+      step_list_of : { obj.Id(str) : "1,2" | "1" | "-" }
+                     per le curve membre: lista (CSV) dei passi a cui
+                     partecipano; per le linee-asse: il passo che definiscono.
+      steps        : [ {"order":k, "axis":obj, "role":str,
+                        "member_ids":set(str), "n_membri":int} ]  ordinati
+      errors       : [str] bloccanti     warns: [str] avvisi
     """
-    blocks = {}
-    block_of = {}
+    if _selection_has_groups(objs):
+        return _resolve_steps_by_groups(objs)
+    return _resolve_steps_by_userstring(objs)
+
+
+def _resolve_steps_by_groups(objs):
+    errors = []
+    warns = []
+
+    # 1) Individua gli assi (linee cyan) e il loro tipo.
+    axis_ids = set()
+    axes = []  # (obj, role, [gruppi])
+    for obj in objs:
+        role = _cyan_axis_role(obj)
+        if role is not None:
+            axis_ids.add(str(obj.Id))
+            axes.append((obj, role, _object_groups(obj)))
+
+    # 2) Membri (NON-asse) per ciascun gruppo.
+    group_member_ids = {}
+    for obj in objs:
+        oid = str(obj.Id)
+        if oid in axis_ids:
+            continue
+        for g in _object_groups(obj):
+            group_member_ids.setdefault(g, set()).add(oid)
+
+    # 3) Ogni asse definisce un passo: gruppo definitorio = il piu' piccolo
+    #    (meno membri) che lo contiene = il livello piu' interno dell'asse.
+    steps_raw = []  # (axis_obj, role, gidx, member_id_set)
+    for (axobj, role, groups) in axes:
+        if not groups:
+            warns.append("Asse cyan %s non appartiene ad alcun gruppo Rhino: "
+                         "impossibile sapere cosa riflettere. Raggruppalo "
+                         "(_Group) con le sue curve." % str(axobj.Id)[:8])
+            continue
+        gsel, gsize = None, None
+        for g in groups:
+            sz = len(group_member_ids.get(g, set()))
+            if gsize is None or sz < gsize:
+                gsize, gsel = sz, g
+        steps_raw.append((axobj, role, gsel, group_member_ids.get(gsel, set())))
+
+    # 4) Errore: due assi di tipo diverso che definiscono lo STESSO gruppo.
+    by_group = {}
+    for (axobj, role, gsel, mids) in steps_raw:
+        by_group.setdefault(gsel, []).append(role)
+    for g, roles in by_group.items():
+        if len(set(roles)) > 1:
+            errors.append("Gruppo Rhino %d: contiene assi di tipo diverso "
+                          "(%s) come definitori dello stesso passo. Un passo "
+                          "ammette UN solo asse." % (g, ", ".join(sorted(set(roles)))))
+
+    # 5) Ordina: interno (pochi membri) -> esterno; patella prima di simmetria.
+    def _role_rank(r):
+        return 0 if r == AXIS_ROLE_DASHED else 1
+    steps_sorted = sorted(steps_raw, key=lambda s: (len(s[3]), _role_rank(s[1])))
+
+    steps = []
+    for i, (axobj, role, gsel, mids) in enumerate(steps_sorted, start=1):
+        steps.append({"order": i, "axis": axobj, "role": role,
+                      "member_ids": set(mids), "n_membri": len(mids)})
+
+    # 6) Avviso se i passi non sono annidati a catena (matrioska attesa).
+    for i in range(1, len(steps)):
+        if not steps[i - 1]["member_ids"].issubset(steps[i]["member_ids"]):
+            warns.append("Passi %d e %d non risultano annidati (matrioska): "
+                         "verifica che il gruppo esterno includa le curve di "
+                         "quello interno." % (steps[i - 1]["order"],
+                                              steps[i]["order"]))
+
+    # 7) step_list per oggetto.
+    step_list_of = {}
+    axis_step = {}
+    for s in steps:
+        axis_step[str(s["axis"].Id)] = s["order"]
+    for obj in objs:
+        oid = str(obj.Id)
+        if oid in axis_ids:
+            k = axis_step.get(oid)
+            step_list_of[oid] = str(k) if k else "-"
+        else:
+            ks = [str(s["order"]) for s in steps if oid in s["member_ids"]]
+            step_list_of[oid] = ",".join(ks) if ks else "-"
+
+    return step_list_of, steps, errors, warns
+
+
+def _resolve_steps_by_userstring(objs):
+    """Fallback v5.4: passi dalla UserString 'Blocco' (un solo livello per
+    oggetto, niente annidamento esplicito)."""
+    errors = []
+    warns = []
+    by_num = {}  # numero -> {"axes":[(obj,role)], "member_ids":set}
     for obj in objs:
         n = _block_number(obj)
         if not n:
             continue
-        block_of[str(obj.Id)] = n
-        b = blocks.get(n)
-        if b is None:
-            b = {"members": [], "axis": None}
-            blocks[n] = b
-        b["members"].append(obj)
-        if b["axis"] is None and _is_cyan_axis_line(obj):
-            b["axis"] = obj
-    axis_ids = set(str(b["axis"].Id) for b in blocks.values()
-                   if b["axis"] is not None)
-    return block_of, axis_ids, blocks
+        d = by_num.setdefault(n, {"axes": [], "member_ids": set()})
+        role = _cyan_axis_role(obj)
+        if role is not None:
+            d["axes"].append((obj, role))
+        else:
+            d["member_ids"].add(str(obj.Id))
 
-
-def _mirror_summary_lines(blocks):
-    """Righe di commento '# ...' che riassumono i blocchi di specchiatura per
-    l'LLM: asse (coordinate + forma parametrica se nota) e n. membri."""
-    out = []
-    if not blocks:
-        return out
-    out.append("# BLOCCHI DI SPECCHIATURA (numero = ordine di esecuzione):")
-    for n in sorted(blocks.keys(), key=lambda s: (len(s), s)):
-        b = blocks[n]
-        ax = b["axis"]
-        nm = len(b["members"])
-        if ax is None:
-            out.append("#   Blocco %s: [nessuna linea cyan nel blocco] - "
-                       "membri: %d" % (n, nm))
+    nums_sorted = sorted(by_num.keys(), key=lambda s: (len(s), s))
+    steps = []
+    order = 0
+    for n in nums_sorted:
+        d = by_num[n]
+        roles = set(r for (_o, r) in d["axes"])
+        if len(roles) > 1:
+            errors.append("Blocco %s: assi di tipo diverso (%s). Un blocco "
+                          "ammette UN solo asse." % (n, ", ".join(sorted(roles))))
             continue
+        if not d["axes"]:
+            warns.append("Blocco %s: nessuna linea cyan; ignorato." % n)
+            continue
+        if len(d["axes"]) > 1:
+            warns.append("Blocco %s: piu' assi dello stesso tipo; uso il "
+                         "primo." % n)
+        ax_obj, ax_role = d["axes"][0]
+        order += 1
+        steps.append({"order": order, "axis": ax_obj, "role": ax_role,
+                      "member_ids": set(d["member_ids"]),
+                      "n_membri": len(d["member_ids"]), "_blocco": n})
+
+    step_list_of = {}
+    axis_step = {}
+    for s in steps:
+        axis_step[str(s["axis"].Id)] = s["order"]
+    for obj in objs:
+        oid = str(obj.Id)
+        if oid in axis_step:
+            step_list_of[oid] = str(axis_step[oid])
+        else:
+            ks = [str(s["order"]) for s in steps if oid in s["member_ids"]]
+            step_list_of[oid] = ",".join(ks) if ks else "-"
+    return step_list_of, steps, errors, warns
+
+
+def _mirror_summary_lines(steps):
+    """Righe di commento '# ...' che riassumono i PASSI di specchiatura per
+    l'LLM e per PKG_Esegue: ordine, tipo d'asse, forma parametrica, n. membri.
+    L'ordine e' di esecuzione (dal piu' interno al piu' esterno)."""
+    out = []
+    if not steps:
+        return out
+    out.append("# PASSI DI SPECCHIATURA (ordine = esecuzione, dal piu' interno "
+               "al piu' esterno):")
+    out.append("#   continuo=SIMMETRIA (mantiene l'origine) | "
+               "tratteggiato=PATELLA (cancella l'origine)")
+    out.append("#   matrioska: ogni passo riflette ANCHE i risultati dei passi "
+               "interni precedenti (la colonna Blocco elenca i passi di ogni "
+               "curva).")
+    for s in steps:
+        ax = s["axis"]
+        if s["role"] == AXIS_ROLE_DASHED:
+            tipo_txt = "TRATTEGGIATO (patella: cancella origine)"
+        else:
+            tipo_txt = "CONTINUO (simmetria: mantiene origine)"
         g = _refetch(ax).Geometry
         p0 = g.PointAtStart
         p1 = g.PointAtEnd
@@ -1136,8 +1491,9 @@ def _mirror_summary_lines(blocks):
         par = ""
         if p1p or p2p:
             par = "  asse_param: %s -> %s" % (p1p or "?", p2p or "?")
-        out.append("#   Blocco %s: asse (%.3f,%.3f)->(%.3f,%.3f)%s  membri: %d"
-                   % (n, p0.X, p0.Y, p1.X, p1.Y, par, nm))
+        out.append("#   Passo %d: asse %s (%.3f,%.3f)->(%.3f,%.3f)%s  "
+                   "membri: %d" % (s["order"], tipo_txt, p0.X, p0.Y,
+                                   p1.X, p1.Y, par, s["n_membri"]))
     return out
 
 
@@ -1187,39 +1543,57 @@ COME LEGGERE I DATI CHE SEGUONO
 COME RICONOSCERE GLI ASSI DI SPECCHIO (linee cyan)
 - Gli assi di specchiatura NON sono geometria da fustellare. Una linea
   e' un ASSE se soddisfa anche solo uno di questi criteri:
-    (a) colonna Ruolo = AsseSpecchio;  OPPURE
+    (a) colonna Ruolo = AsseSpecchio_Continuo o AsseSpecchio_Tratteggiato
+        (o il generico AsseSpecchio);  OPPURE
     (b) Layer NON strutturale, cioe' diverso da Taglio, Cordone,
         MezzoTaglio, Foratore (tipicamente Layer 'Disegno'): nel
         disegno corrisponde a una LINEA CYAN.
-  Vale ANCHE se le colonne Ruolo e Blocco sono '-'. In questi dati la
-  linea su Layer 'Disegno' (bordo orizzontale superiore) e' l'ASSE,
-  NON un taglio: non confonderla con la geometria.
-- La colonna Blocco, quando valorizzata, raggruppa le geometrie che
-  condividono lo stesso asse; se vale '-', considera un unico asse per
-  l'intera figura.
+  Vale ANCHE se le colonne Ruolo e Blocco sono '-'. Una linea su Layer
+  'Disegno' (es. bordo superiore) e' un ASSE, NON un taglio.
+- DUE TIPI DI ASSE, distinti dal tipo di linea cyan:
+    * CONTINUA  -> Ruolo = AsseSpecchio_Continuo  = asse di SIMMETRIA:
+      rifletti le geometrie e MANTIENI sia origine sia copia (scatola
+      intera).
+    * TRATTEGGIATA -> Ruolo = AsseSpecchio_Tratteggiato = asse di PATELLA:
+      rifletti le geometrie e CANCELLA gli originali (vive solo la copia
+      ribaltata). E' lo sviluppo di un'aletta che si ripiega.
+- La colonna Blocco e' la LISTA dei PASSI (es. '1,2') a cui ogni curva
+  partecipa; per le linee-asse e' il passo che definiscono. I passi sono
+  annidati come matrioske e numerati dal piu' INTERNO (1) al piu' ESTERNO.
+  Esegui i passi UNO ALLA VOLTA in ordine crescente: al passo k rifletti
+  TUTTE le curve la cui lista di passi contiene k (escluse le linee-asse),
+  rispetto all'asse del passo k. Una curva interna compare in piu' passi,
+  quindi viene rispecchiata di nuovo dal passo esterno: e' cosi' che la
+  simmetria finale ingloba i risultati delle patelle. Se Blocco vale '-'
+  per tutto, considera un unico asse per l'intera figura.
 
 SPECCHIATURA E PULIZIA (ULTIME operazioni dello script)
 - Il tracciato esportato e' di norma una META' (o una porzione) della
-  fustella: l'asse indica dove riflettere per ottenere l'INTERO.
-- L'asse e' di SERVIZIO: si ricostruisce solo per riflettere e si
+  fustella: gli assi indicano dove riflettere per ottenere l'INTERO.
+- Ogni asse e' di SERVIZIO: si ricostruisce solo per riflettere e si
   CANCELLA alla fine. Nella fustella prodotta non deve restare.
 - Esegui queste come ULTIME operazioni, dopo aver costruito tutte le
-  geometrie origine:
-    1. Ricostruisci OGNI asse in modo PARAMETRICO dai suoi P1_param/
-       P2_param (se assenti, usa gli estremi numerici). Ricavalo dalla
-       FORMULA, non da una linea disegnata a mano, e NON cercarlo nel
-       documento Rhino.
-    2. Rifletti le geometrie origine rispetto alla RETTA dell'asse e
-       MANTIENI sia origine sia copia (scatola intera). Con piu'
-       blocchi, applica gli assi in ordine crescente di Blocco.
-    3. CANCELLA l'asse (o gli assi): e' l'ultimissima operazione. Nel
-       risultato finale non deve restare alcuna linea d'asse.
+  geometrie origine, SEGUENDO L'ORDINE DEI PASSI (1, 2, 3, ...):
+    1. Ricostruisci l'asse del passo corrente in modo PARAMETRICO dai
+       suoi P1_param/P2_param (se assenti, usa gli estremi numerici).
+       Ricavalo dalla FORMULA, non da una linea disegnata a mano, e NON
+       cercarlo nel documento Rhino.
+    2. Rifletti rispetto alla RETTA dell'asse tutte le curve la cui lista
+       di passi (colonna Blocco) contiene il passo corrente (escluse le
+       linee-asse), poi:
+         - se l'asse e' TRATTEGGIATO (patella): CANCELLA gli originali
+           riflessi, tieni solo le copie (le copie ereditano la lista di
+           passi, quindi restano disponibili per i passi successivi);
+         - se l'asse e' CONTINUO (simmetria): MANTIENI sia origine sia
+           copia (scatola intera).
+    3. Passa al passo successivo (numero maggiore) e ripeti: cosi' il
+       passo esterno ingloba e rispecchia i risultati di quelli interni.
+    4. Come ULTIMISSIMA operazione, CANCELLA ogni linea d'asse: nel
+       risultato finale non deve restarne alcuna.
 - Poiche' l'asse nasce dalle stesse formule del bordo, giace ESATTAMENTE
-  sull'edge condiviso: le due meta' devono COMBACIARE, senza distacco ne
-  sovrapposizione. Se risultano STACCATE, l'asse e' posizionato male:
-  ricavalo dalla FORMULA.
-- (Le PATELLE, dove l'origine sparisce e resta solo la copia, non sono
-  gestite in questa versione: tratta tutto come scatola intera.)
+  sull'edge condiviso: dopo una SIMMETRIA le due meta' devono COMBACIARE,
+  senza distacco ne sovrapposizione. Se risultano STACCATE, l'asse e'
+  posizionato male: ricavalo dalla FORMULA.
 
 COSA DEVI PRODURRE
 Uno script che:
@@ -1263,9 +1637,70 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
     all_bbox = rg.BoundingBox.Empty
     idx = 1
 
-    # Specchiatura: blocchi + assi cyan (v5.3)
-    block_of, axis_ids, blocks = _resolve_mirror_blocks(
-        list(point_objs) + list(curve_objs))
+    # Specchiatura: passi + assi cyan (v5.5: gruppi Rhino, continua/tratteggiata)
+    step_list_of, steps, mirror_errors, mirror_warns = \
+        _resolve_mirror_steps(list(point_objs) + list(curve_objs))
+
+    # Errore bloccante: un gruppo con assi di tipo misto (continuo +
+    # tratteggiato) ha semantica ambigua. Niente export.
+    if mirror_errors:
+        print("")
+        print("[ERRORE] Export annullato per conflitto sugli assi di "
+              "specchiatura:")
+        for e in mirror_errors:
+            print("   - %s" % e)
+        print("Correggi i gruppi (un solo tipo di linea cyan per passo) "
+              "e riprova.")
+        _show_blocking_error(mirror_errors)
+        return
+
+    for w in mirror_warns:
+        print("[AVVISO] %s" % w)
+
+    using_groups = _selection_has_groups(list(point_objs) + list(curve_objs))
+    print("[INFO] Membership specchiatura: %s" % (
+        "GRUPPI Rhino" if using_groups else "UserString 'Blocco' (fallback)"))
+    if steps:
+        print("[INFO] %d passo/i di specchiatura rilevati:" % len(steps))
+        for s in steps:
+            tt = ("tratteggiato/patella" if s["role"] == AXIS_ROLE_DASHED
+                  else "continuo/simmetria")
+            print("   Passo %d: asse %s, membri=%d" % (
+                s["order"], tt, s["n_membri"]))
+
+    # DIAGNOSTICA SPECCHIATURA: per ogni curva cyan o lineare, mostra cosa
+    # "vede" lo script. Serve a capire i mancati riconoscimenti.
+    print("[DIAG specchiatura] curve cyan/lineari tra le selezionate:")
+    n_diag = 0
+    n_axis_no_group = 0
+    for obj in curve_objs:
+        ro = _refetch(obj)
+        g = ro.Geometry
+        is_lin = _is_linear_curve(g)
+        col = _effective_color(ro)
+        is_cy = _is_cyan(col)
+        if not (is_lin or is_cy):
+            continue
+        n_diag += 1
+        name, seg, plen, cont = _linetype_debug(ro)
+        role = _cyan_axis_role(ro)
+        grps = _object_groups(ro)
+        steplist = step_list_of.get(str(ro.Id), "-")
+        if role is not None and not grps:
+            n_axis_no_group += 1
+        print("   id=%s lin=%s RGB=(%d,%d,%d) cyan=%s ltype=%s seg=%s "
+              "plen=%s continuo=%s gruppi=%s passi=%s -> ruolo=%s" % (
+                  str(ro.Id)[:8], is_lin, int(col.R), int(col.G), int(col.B),
+                  is_cy, name, seg, plen, cont,
+                  (",".join(str(x) for x in grps) if grps else "-"),
+                  steplist, role or "-"))
+    if n_diag == 0:
+        print("   (nessuna curva cyan o lineare rilevata)")
+    if n_axis_no_group > 0:
+        print("[AVVISO] %d linee asse cyan riconosciute SENZA gruppo Rhino: "
+              "vengono marcate col ruolo nel TXT ma NON entrano nell'ordine "
+              "di specchiatura. Raggruppale (_Group) con le loro curve."
+              % n_axis_no_group)
 
     # Punti
     for obj in point_objs:
@@ -1276,8 +1711,8 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
         _oid = str(obj.Id)
         rows.append(row_for_point(
             idx, obj,
-            block=block_of.get(_oid, "-"),
-            role=(MIRROR_AXIS_ROLE if _oid in axis_ids else "-")))
+            block=step_list_of.get(_oid, "-"),
+            role=_cyan_axis_role(obj) or "-"))
         idx += 1
         n_total += 1
 
@@ -1288,8 +1723,11 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
         tipo = classify_curve(obj)
         ut = get_user_text(obj)  # letto UNA volta dall'oggetto fresco
         _oid = str(obj.Id)
-        _blk = block_of.get(_oid, "-")
-        _role = MIRROR_AXIS_ROLE if _oid in axis_ids else "-"
+        # v5.5: Blocco = lista dei passi (CSV) cui la curva partecipa
+        # (matrioska: una curva interna compare in piu' passi).
+        _blk = step_list_of.get(_oid, "-")
+        # Il ruolo deriva dal colore+linetype, indipendente dal gruppo.
+        _role = _cyan_axis_role(obj) or "-"
         bb = curve.GetBoundingBox(True)
         if bb.IsValid:
             all_bbox.Union(bb)
@@ -1324,8 +1762,10 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
         doc_name, bbox_str, n_curves, n_points, n_total, n_exploded, unit))
     lines.append("# Tipo: T=Taglio C=Cordone M=MezzoTaglio F=Foratore P=Point")
     lines.append("# Angoli archi: convenzione con segno (CW = negativo)")
+    lines.append("# Blocco: lista dei passi di specchiatura (CSV) cui la curva "
+                 "partecipa; per le linee-asse e' il passo che definiscono.")
     lines.append("# Colonne: " + "  ".join(COLUMNS))
-    for _ml in _mirror_summary_lines(blocks):
+    for _ml in _mirror_summary_lines(steps):
         lines.append(_ml)
 
     for r in rows:
@@ -1372,7 +1812,7 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
 
 def main():
     print("=" * 60)
-    print("ESPORTA GEOMETRIE PARAMETRICO v5.3")
+    print("ESPORTA GEOMETRIE PARAMETRICO v5.5")
     print("=" * 60)
 
     selected = list(sc.doc.Objects.GetSelectedObjects(False, False))
