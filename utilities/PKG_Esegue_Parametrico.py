@@ -1,7 +1,7 @@
 #! python 2
 # -*- coding: utf-8 -*-
 """
-PKG_Genera_Da_TXT.py   v2.1
+PKG_Genera_Da_TXT.py   v2.2
 Rhino 7/8  |  IronPython 2.7  |  RhinoCommon
 
 Workflow:
@@ -10,7 +10,13 @@ Workflow:
      lineare implicito nelle formule X_param/Y_param dei punti
   3. Apre il dialog con i valori pre-caricati + preview in tempo reale
   4. Genera le curve sui layer Taglio / Cordone / ... con tag di pulizia
-  5. Supporta l'asse di specchiatura (linea con UserText chiave "A=")
+  5. Specchiatura a PASSI (export v5.5): gli assi sono marcati nella colonna
+     Ruolo (AsseSpecchio_Continuo = simmetria, mantiene l'origine;
+     AsseSpecchio_Tratteggiato = patella, cancella l'origine). La colonna
+     Blocco elenca i passi (CSV) a cui ogni curva partecipa. I passi si
+     eseguono in ordine (interno -> esterno) con riporto matrioska: le copie
+     ereditano l'appartenenza, cosi' la simmetria finale ingloba le patelle.
+     Fallback: vecchio asse singolo via UserText "A=".
 
 Geometry builders (ironpython-examples.md):
   Line  → Line(p1, p2).ToNurbsCurve()                          (§14)
@@ -32,7 +38,7 @@ import re
 import os
 import codecs
 
-_VERSION = "2.1"
+_VERSION = "2.2"
 
 # ── Tag oggetti generati ───────────────────────────────────────────
 TAG_KEY = "PKG_GEN_TXT"
@@ -41,6 +47,11 @@ TAG_VAL = "1"
 # ── Colonne TXT ────────────────────────────────────────────────────
 C_TIPO, C_GEOM, C_LAYER = 1, 2, 4
 C_X1, C_Y1, C_X2, C_Y2  = 5, 6, 7, 8
+C_BLOCCO, C_RUOLO       = 19, 20   # v5.5: lista passi / ruolo asse
+
+# ── Ruoli asse di specchiatura (export v5.5) ───────────────────────
+AXIS_ROLE_CONTINUOUS = "AsseSpecchio_Continuo"     # simmetria: mantiene origine
+AXIS_ROLE_DASHED     = "AsseSpecchio_Tratteggiato"  # patella: cancella origine
 
 # ── Variabili parametriche ─────────────────────────────────────────
 VAR_NAMES = ["L", "P", "A", "S", "C", "T", "E"]
@@ -84,6 +95,26 @@ def parse_ut(s):
             k, v = kv.split("=", 1)
             d[k.strip()] = v.strip()
     return d
+
+
+def _cell(row, idx, default="-"):
+    """Cella idx della riga, o default se la riga e' piu' corta."""
+    return row[idx] if len(row) > idx else default
+
+
+def parse_steps_list(s):
+    """Colonna Blocco v5.5: '1,2' -> set([1,2]); '-'/'' -> set vuoto."""
+    out = set()
+    if not s or s == "-":
+        return out
+    for tok in s.split(","):
+        tok = tok.strip()
+        if tok:
+            try:
+                out.add(int(tok))
+            except Exception:
+                pass
+    return out
 
 
 def safe_eval(expr, vd):
@@ -234,8 +265,10 @@ def build_preview_curves(rows):
         geom = row[C_GEOM].strip()
         ut   = parse_ut(row[-1])
 
-        # Asse di specchiatura → tipo "X" per colore Cyan nel preview
-        if "A" in ut:
+        # Asse di specchiatura → tipo "X" per colore Cyan nel preview.
+        # Nuovo (v5.5): colonna Ruolo; vecchio: chiave "A" nello UserText.
+        ruolo = _cell(row, C_RUOLO)
+        if ruolo in (AXIS_ROLE_CONTINUOUS, AXIS_ROLE_DASHED) or ("A" in ut):
             p1s = ut.get("P1_param"); p2s = ut.get("P2_param")
             if p1s and p2s:
                 result.append(("X", "line", ut))
@@ -490,7 +523,7 @@ class _DlgParams(WF.Form):
         y += 14
 
         self._cb_mirror = WF.CheckBox()
-        self._cb_mirror.Text     = "Specchia sull'asse"
+        self._cb_mirror.Text     = "Esegui specchiature (passi)"
         self._cb_mirror.Location = SD.Point(LX, y)
         self._cb_mirror.Size     = SD.Size(225, 20)
         self._cb_mirror.Enabled  = has_axis
@@ -499,7 +532,7 @@ class _DlgParams(WF.Form):
         y += 24
 
         self._cb_axis = WF.CheckBox()
-        self._cb_axis.Text     = "Mostra asse di costruzione"
+        self._cb_axis.Text     = "Mostra assi (debug)"
         self._cb_axis.Location = SD.Point(LX, y)
         self._cb_axis.Size     = SD.Size(225, 20)
         self._cb_axis.Enabled  = has_axis
@@ -1099,9 +1132,11 @@ def apply_fillets(real_list, fillet_notes, vd, atol, angtol):
       2. Se entrambe sono linee rette: fillet_line_line esatto
       3. Fallback: Rhino.Geometry.Curve.CreateFilletCurves
       4. Sostituisce le due curve con [linea_troncata, arco, linea_troncata]
+    Gli item sono [crv, layer_idx, steps_set]; i pezzi del raccordo ereditano
+    l'UNIONE degli insiemi di passi delle due curve sorgente.
     Ritorna (lista_aggiornata, n_applicati, n_falliti).
     """
-    items  = list(real_list)   # copia mutabile di [(crv, layer_idx)]
+    items  = list(real_list)   # copia mutabile di [[crv, li, steps], ...]
     tolc   = 0.25              # mm: raggio di ricerca vertice
     n_ok   = 0
     n_fail = 0
@@ -1116,7 +1151,8 @@ def apply_fillets(real_list, fillet_notes, vd, atol, angtol):
 
         # Trova indici delle curve che toccano questo angolo
         hits = []
-        for idx, (crv, li) in enumerate(items):
+        for idx, item in enumerate(items):
+            crv = item[0]
             if crv is None:
                 continue
             try:
@@ -1132,8 +1168,9 @@ def apply_fillets(real_list, fillet_notes, vd, atol, angtol):
             continue
 
         i0, i1 = hits[0], hits[1]
-        c0, lay = items[i0]
-        c1, _   = items[i1]
+        c0, lay, s0 = items[i0][0], items[i0][1], items[i0][2]
+        c1, _,   s1 = items[i1][0], items[i1][1], items[i1][2]
+        merged_steps = set(s0) | set(s1)
         pieces  = None
 
         # Tentativo 1: raccordo analitico linea–linea
@@ -1162,7 +1199,7 @@ def apply_fillets(real_list, fillet_notes, vd, atol, angtol):
         for ix in sorted([i0, i1], reverse=True):
             del items[ix]
         for rc in pieces:
-            items.append((rc, lay))
+            items.append([rc, lay, set(merged_steps)])
         n_ok += 1
 
     return items, n_ok, n_fail
@@ -1182,6 +1219,40 @@ def make_mirror_xform(p1, p2):
     n = rg.Vector3d(-d.Y, d.X, 0.0)
     plane = rg.Plane(p1, n)
     return rg.Transform.Mirror(plane)
+
+
+def find_mirror_steps(rows):
+    """Sistema v5.5: individua i PASSI di specchiatura dalle righe-asse
+    marcate nella colonna Ruolo. Ritorna lista ordinata per numero di passo
+    crescente (interno -> esterno): [{"order":k,"role":r,"row":..,"ut":..}]."""
+    steps = {}
+    for row in rows:
+        ruolo = _cell(row, C_RUOLO)
+        if ruolo not in (AXIS_ROLE_CONTINUOUS, AXIS_ROLE_DASHED):
+            continue
+        kset = parse_steps_list(_cell(row, C_BLOCCO))
+        if not kset:
+            continue
+        k = min(kset)
+        steps[k] = {"order": k, "role": ruolo, "row": row,
+                    "ut": parse_ut(row[-1])}
+    return [steps[k] for k in sorted(steps.keys())]
+
+
+def eval_axis_pts(info, vd):
+    """Valuta gli estremi dell'asse di un passo coi parametri correnti.
+    Prima P1_param/P2_param (parametrico), poi fallback alle coord assolute."""
+    ut = info["ut"]
+    row = info["row"]
+    p1 = eval_pt(ut.get("P1_param"), vd)
+    p2 = eval_pt(ut.get("P2_param"), vd)
+    if p1 is not None and p2 is not None:
+        return (p1, p2)
+    try:
+        return (rg.Point3d(float(row[C_X1]), float(row[C_Y1]), 0.0),
+                rg.Point3d(float(row[C_X2]), float(row[C_Y2]), 0.0))
+    except Exception:
+        return None
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -1287,8 +1358,11 @@ def eval_axis(axis_data, vd):
 #  Generazione in Rhino
 # ═══════════════════════════════════════════════════════════════════
 
-def generate(rows, vd, opts, axis_data, fillet_notes):
-    """Ricostruisce e inserisce le curve nel documento Rhino."""
+def generate(rows, vd, opts, axis_data, mirror_steps, fillet_notes):
+    """Ricostruisce e inserisce le curve nel documento Rhino.
+    Specchiatura v5.5: esegue i PASSI in ordine (interno -> esterno) con la
+    regola continuo=mantieni origine / tratteggiato=cancella origine, e
+    riporto matrioska (le copie ereditano l'appartenenza ai passi)."""
     if opts["clear"]:
         n_del = clear_previous()
         if n_del:
@@ -1302,82 +1376,125 @@ def generate(rows, vd, opts, axis_data, fillet_notes):
             layer_cache[name] = get_or_create_layer(name, col)
         return layer_cache[name]
 
-    # Transform di specchiatura (valutato con i parametri correnti)
-    mirror_xf = None
-    axis_pts = eval_axis(axis_data, vd)
-    if opts["mirror"] and axis_pts is not None:
-        mirror_xf = make_mirror_xform(axis_pts[0], axis_pts[1])
-
-    # ── PASSO 1: costruzione curve ─────────────────────────────────
-    real_list = []   # [(crv, layer_idx), ...]
-    axis_crvs = []   # asse di costruzione (separato)
-    n_abs     = 0
-    reasons   = {}
+    # ── PASSO 1: costruzione curve (con appartenenza ai passi) ─────
+    # work = [ [crv, layer_idx, steps_set], ... ]
+    work    = []
+    n_abs   = 0
+    reasons = {}
+    axis_role_set = (AXIS_ROLE_CONTINUOUS, AXIS_ROLE_DASHED)
 
     for row in rows:
         if len(row) < 6:
             continue
-        tipo       = row[C_TIPO]
+        tipo = row[C_TIPO]
         if tipo == "P":
             continue
-        layer_name = row[C_LAYER] if len(row) > C_LAYER else "Taglio"
-        ut         = parse_ut(row[-1])
-
-        # Asse di costruzione: separato
-        if "A" in ut:
-            if opts["axis"] and axis_pts is not None:
-                # Linea Cyan parametrica: usa i punti valutati con vd
-                try:
-                    crv = rg.Line(axis_pts[0], axis_pts[1]).ToNurbsCurve()
-                    axis_crvs.append((crv, layer_idx("PKG_Costruzione_Cyan")))
-                except Exception:
-                    pass
+        ut = parse_ut(row[-1])
+        ruolo = _cell(row, C_RUOLO)
+        # Asse = servizio: non entra nell'output (nuovo: Ruolo; vecchio: "A").
+        if ruolo in axis_role_set or ("A" in ut):
             continue
 
+        layer_name = row[C_LAYER] if len(row) > C_LAYER else "Taglio"
         crv, err = reconstruct(ut, row, vd)
         if crv is None:
             reasons[err] = reasons.get(err, 0) + 1
             continue
-
         if not ut.get("Comando") and not ut.get("P1_param"):
             n_abs += 1
+        steps_set = parse_steps_list(_cell(row, C_BLOCCO))
+        work.append([crv, layer_idx(layer_name), steps_set])
 
-        real_list.append((crv, layer_idx(layer_name)))
-
-    # ── PASSO 2: raccordi ──────────────────────────────────────────
+    # ── PASSO 2: raccordi (step-aware) ─────────────────────────────
     n_fillet_ok   = 0
     n_fillet_fail = 0
     if opts.get("fillets") and fillet_notes:
         atol   = sc.doc.ModelAbsoluteTolerance
         angtol = sc.doc.ModelAngleToleranceRadians
-        real_list, n_fillet_ok, n_fillet_fail = apply_fillets(
-            real_list, fillet_notes, vd, atol, angtol)
+        work, n_fillet_ok, n_fillet_fail = apply_fillets(
+            work, fillet_notes, vd, atol, angtol)
 
-    # ── PASSO 3: inserimento in Rhino ──────────────────────────────
+    # ── PASSO 3: specchiature (in ordine di passo) ─────────────────
+    n_steps_done = 0
+    n_base = len(work)
+    if opts["mirror"]:
+        if mirror_steps:
+            for st in mirror_steps:   # ordinati: interno -> esterno
+                pts = eval_axis_pts(st, vd)
+                if pts is None:
+                    print("[AVVISO] Passo %d: asse non valutabile, saltato."
+                          % st["order"])
+                    continue
+                xf = make_mirror_xform(pts[0], pts[1])
+                if xf is None:
+                    print("[AVVISO] Passo %d: asse degenere, saltato."
+                          % st["order"])
+                    continue
+                k = st["order"]
+                dashed = (st["role"] == AXIS_ROLE_DASHED)
+                snapshot = [it for it in work if k in it[2]]
+                rest     = [it for it in work if k not in it[2]]
+                produced = []
+                for (crv, li, sset) in snapshot:
+                    cp = crv.DuplicateCurve()
+                    cp.Transform(xf)
+                    if dashed:
+                        # patella: l'originale sparisce, vive la copia (che
+                        # eredita i passi -> verra' rispecchiata dai passi
+                        # esterni successivi).
+                        produced.append([cp, li, set(sset)])
+                    else:
+                        # simmetria: mantieni origine + copia.
+                        produced.append([crv, li, set(sset)])
+                        produced.append([cp, li, set(sset)])
+                work = rest + produced
+                n_steps_done += 1
+        elif axis_data is not None:
+            # Fallback TXT precedente: asse singolo, mantieni origine + copia.
+            pts = eval_axis(axis_data, vd)
+            if pts is not None:
+                xf = make_mirror_xform(pts[0], pts[1])
+                if xf is not None:
+                    extra = []
+                    for (crv, li, sset) in work:
+                        cp = crv.DuplicateCurve()
+                        cp.Transform(xf)
+                        extra.append([cp, li, set(sset)])
+                    work = work + extra
+                    n_steps_done = 1
+
+    # ── PASSO 4: inserimento in Rhino ──────────────────────────────
     created = []
     n_ok    = 0
-
-    # Asse di costruzione
-    for crv, li in axis_crvs:
+    for (crv, li, sset) in work:
         gid = sc.doc.Objects.AddCurve(crv, mk_attr(li))
         if gid != System.Guid.Empty:
             created.append(gid)
-
-    # Curve principali (+ specchiatura)
-    for crv, li in real_list:
-        attr = mk_attr(li)
-        gid  = sc.doc.Objects.AddCurve(crv, attr)
-        if gid != System.Guid.Empty:
-            created.append(gid)
             n_ok += 1
-            if mirror_xf is not None:
-                crv2 = crv.DuplicateCurve()
-                crv2.Transform(mirror_xf)
-                gid2 = sc.doc.Objects.AddCurve(crv2, mk_attr(li))
-                if gid2 != System.Guid.Empty:
-                    created.append(gid2)
         else:
             reasons["AddCurve fallita"] = reasons.get("AddCurve fallita", 0) + 1
+
+    # Assi di costruzione (debug, opzionale): li disegna SOLO se richiesto.
+    if opts.get("axis"):
+        axis_pts_list = []
+        if mirror_steps:
+            for st in mirror_steps:
+                p = eval_axis_pts(st, vd)
+                if p:
+                    axis_pts_list.append(p)
+        elif axis_data is not None:
+            p = eval_axis(axis_data, vd)
+            if p:
+                axis_pts_list.append(p)
+        for (a, b) in axis_pts_list:
+            try:
+                acrv = rg.Line(a, b).ToNurbsCurve()
+                gid = sc.doc.Objects.AddCurve(
+                    acrv, mk_attr(layer_idx("PKG_Costruzione_Cyan")))
+                if gid != System.Guid.Empty:
+                    created.append(gid)
+            except Exception:
+                pass
 
     # Raggruppa tutto
     if created:
@@ -1390,8 +1507,9 @@ def generate(rows, vd, opts, axis_data, fillet_notes):
     # ── Report ─────────────────────────────────────────────────────
     print("\n" + "─" * 60)
     print("Curve generate:   %d" % n_ok)
-    if mirror_xf is not None:
-        print("  + specchiate:  %d  (tot. con mirror: %d)" % (n_ok, n_ok * 2))
+    if opts["mirror"] and n_steps_done:
+        print("  Specchiature eseguite: %d passo/i (curve base: %d -> "
+              "totale: %d)" % (n_steps_done, n_base, n_ok))
     if n_abs:
         print("  di cui %d da coordinate assolute (non parametriche)" % n_abs)
     if n_fillet_ok or n_fillet_fail:
@@ -1448,10 +1566,20 @@ def main():
     defaults = dict(DEFAULTS)
     defaults.update(derived)
 
-    # 4 ── Asse di specchiatura
-    axis_data = find_axis(rows)
-    if axis_data:
-        print("Asse di specchiatura trovato.")
+    # 4 ── Specchiatura: PASSI (v5.5) o asse singolo (formato precedente)
+    mirror_steps = find_mirror_steps(rows)
+    axis_data = None
+    if mirror_steps:
+        print("Passi di specchiatura: %d" % len(mirror_steps))
+        for st in mirror_steps:
+            tt = ("patella/tratteggiato (cancella origine)"
+                  if st["role"] == AXIS_ROLE_DASHED
+                  else "simmetria/continuo (mantiene origine)")
+            print("  Passo %d: %s" % (st["order"], tt))
+    else:
+        axis_data = find_axis(rows)
+        if axis_data:
+            print("Asse di specchiatura (formato precedente) trovato.")
 
     # 5 ── Raccordi da Note di punto
     fillet_notes = collect_fillet_notes(rows)
@@ -1463,7 +1591,7 @@ def main():
 
     # 7 ── Dialog con preview
     dlg = _DlgParams(defaults, preview_curves,
-                     has_axis=(axis_data is not None),
+                     has_axis=(bool(mirror_steps) or axis_data is not None),
                      has_fillets=(len(fillet_notes) > 0))
     if dlg.ShowDialog() != WF.DialogResult.OK:
         print("Annullato.")
@@ -1478,7 +1606,7 @@ def main():
           "%s=%g" % (k, vd[k]) for k in VAR_NAMES))
 
     # 8 ── Generazione
-    generate(rows, vd, opts, axis_data, fillet_notes)
+    generate(rows, vd, opts, axis_data, mirror_steps, fillet_notes)
 
 
 if __name__ == "__main__":
