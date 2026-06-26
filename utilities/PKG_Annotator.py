@@ -2,9 +2,30 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PACKAGING POINT ANNOTATOR  v4.7  -  Rhino 7 / 8  (IronPython 2.7)
+#  PACKAGING POINT ANNOTATOR  v4.8  -  Rhino 7 / 8  (IronPython 2.7)
 #
-#  Novita' v4.7 (RIMOZIONE MOTORE DI SUGGERIMENTO + PULIZIA DOT):
+#  Novita' v4.8 (TOLLERANZA DI COINCIDENZA 0.25mm - STOP AUTO-CANCELLAZIONE):
+#    - I punti vicini non si cancellano piu' a vicenda. La sovrascrittura
+#      (find_existing_by_key) basava l'identita' del punto sulla CHIAVE
+#      arrotondata al millimetro: due punti diversi che cadevano nello stesso
+#      mm condividevano la chiave (es. PKG_X+0010_Y+0005) e venivano trattati
+#      come lo stesso punto, quindi il nuovo CANCELLAVA il vecchio anche a
+#      distanze fino a ~1mm (e il match geometrico di riserva usava ~0.5mm).
+#      Inaccettabile sui tracciati fitti: bisellini, patelle sottili, i due
+#      lati di un'incisione.
+#    - Ora l'identita' e' GEOMETRICA: si considera "lo stesso punto"
+#      (-> sovrascrittura) SOLO un punto la cui distanza euclidea dal click e'
+#      INFERIORE a OVERWRITE_TOL = 0.25mm. A 0.25mm o piu' i punti restano
+#      DISTINTI. Tra piu' candidati entro soglia vince il piu' vicino. La
+#      chiave torna a essere una semplice etichetta, non un criterio di
+#      identita'.
+#    - NOTA: make_point_key arrotonda ancora al mm, quindi due punti distinti
+#      ma piu' vicini di ~1mm possono ancora condividere lo stesso NOME. Non
+#      causa piu' cancellazioni (l'identita' e' la distanza reale); se servisse
+#      un nome univoco sotto il mm, va affinata la risoluzione della chiave
+#      (di concerto con lo script di esportazione che la legge).
+#
+#  Eredita da v4.7 (RIMOZIONE MOTORE DI SUGGERIMENTO + PULIZIA DOT):
 #    - Tolto il motore di suggerimento (suggest_formulas, show_suggest_dialog
 #      e gli helper canonical_form / neighbor_candidates_from / expr_for_gap /
 #      find_farthest_source / collect_source_formulas). I candidati
@@ -134,7 +155,7 @@ from Rhino.Geometry import Point3d
 
 # -----------------------------------------------------------------------------
 DECIMALS     = 4
-VERSION      = "4.7"
+VERSION      = "4.8"
 LAYER_POINTS = "PKG_Punti_Parametrici"
 COLOR_POINTS = System.Drawing.Color.FromArgb(0, 80, 180)
 
@@ -142,6 +163,12 @@ COLOR_POINTS = System.Drawing.Color.FromArgb(0, 80, 180)
 # (Punto 1 v4.2). Sub-micron in pratica: blinda il confronto su coordinate di
 # grande modulo senza allentare la precisione geometrica.
 REL_EPS = 1e-9
+
+# v4.8: soglia di COINCIDENZA per la sovrascrittura (mm). Due punti a distanza
+# euclidea INFERIORE a questo valore sono lo stesso punto: il nuovo sovrascrive
+# il vecchio. A 0.25mm o piu' restano distinti. (Prima l'identita' si basava
+# sulla chiave arrotondata al mm: cancellava punti distanti fino a ~1mm.)
+OVERWRITE_TOL = 0.25
 
 # Colori del PUNTO per stato di completezza (v4.4: niente piu' TextDot,
 # lo stato e' portato dal colore del Point stesso)
@@ -910,46 +937,53 @@ def recolor_points_by_completeness(idx_pts):
 
 
 # -----------------------------------------------------------------------------
-#  SOVRASCRITTURA - basata sulla chiave geometrica
+#  SOVRASCRITTURA - basata sulla COINCIDENZA GEOMETRICA (v4.8)
 # -----------------------------------------------------------------------------
-def find_existing_by_key(point_key, tol):
-    """Cerca il punto esistente con la chiave geometrica data."""
-    idx_pts  = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
+def find_existing_by_key(x, y):
+    """Cerca un punto annotato gia' presente COINCIDENTE col punto cliccato.
+
+    v4.8: l'identita' del punto e' GEOMETRICA, non basata sulla chiave.
+    Prima il confronto era sul nome (chiave arrotondata al mm) e, in subordine,
+    sulla posizione con soglia ~0.5mm: due punti diversi nello stesso
+    millimetro condividevano la chiave e si cancellavano a vicenda anche a
+    ~1mm di distanza. Ora si considera "lo stesso punto" (-> sovrascrittura)
+    SOLO un punto la cui distanza euclidea dal click e' INFERIORE a
+    OVERWRITE_TOL (0.25mm); tra piu' candidati entro soglia vince il piu'
+    vicino. Ritorna (punto_trovato | None, preset).
+
+    Nota: la funzione e' chiamata in main() PRIMA della creazione del punto
+    provvisorio del click corrente, quindi non c'e' rischio di trovare se
+    stessi; nessun id da escludere."""
+    idx_pts = sc.doc.Layers.FindByFullPath(LAYER_POINTS, -1)
 
     found_pt = None
     preset = {"X_param": "", "Y_param": "", "Nota": ""}
+    if idx_pts < 0:
+        return found_pt, preset
 
-    m = re.match(r"^PKG_X([+-])(\d+)_Y([+-])(\d+)$", point_key)
-    if m:
-        kx = int(m.group(2)) * (1 if m.group(1) == "+" else -1)
-        ky = int(m.group(4)) * (1 if m.group(3) == "+" else -1)
-    else:
-        kx, ky = None, None
-
-    tol_match = max(tol, 0.001) + 0.5
-
+    tol2 = OVERWRITE_TOL * OVERWRITE_TOL      # confronto su distanza al quadrato
+    best_d2 = None
     for obj in sc.doc.Objects:
         if obj.IsDeleted:
             continue
-        layer_idx = obj.Attributes.LayerIndex
-        name = obj.Attributes.Name or ""
+        if obj.Attributes.LayerIndex != idx_pts:
+            continue
+        if not isinstance(obj.Geometry, Rhino.Geometry.Point):
+            continue
+        p = obj.Geometry.Location
+        dx = p.X - x
+        dy = p.Y - y
+        d2 = dx * dx + dy * dy
+        if d2 < tol2 and (best_d2 is None or d2 < best_d2):
+            best_d2 = d2
+            found_pt = obj
 
-        if layer_idx == idx_pts and isinstance(obj.Geometry, Rhino.Geometry.Point):
-            hit = False
-            if name == point_key:
-                hit = True
-            elif kx is not None:
-                p = obj.Geometry.Location
-                if abs(p.X - kx) <= tol_match and abs(p.Y - ky) <= tol_match:
-                    hit = True
-            if hit and found_pt is None:
-                found_pt = obj
-                preset["X_param"] = obj.Attributes.GetUserString("X_param") or ""
-                preset["Y_param"] = obj.Attributes.GetUserString("Y_param") or ""
-                preset["Nota"]    = obj.Attributes.GetUserString("Nota") or ""
-                if preset["X_param"] == "--": preset["X_param"] = ""
-                if preset["Y_param"] == "--": preset["Y_param"] = ""
-
+    if found_pt is not None:
+        preset["X_param"] = found_pt.Attributes.GetUserString("X_param") or ""
+        preset["Y_param"] = found_pt.Attributes.GetUserString("Y_param") or ""
+        preset["Nota"]    = found_pt.Attributes.GetUserString("Nota") or ""
+        if preset["X_param"] == "--": preset["X_param"] = ""
+        if preset["Y_param"] == "--": preset["Y_param"] = ""
 
     return found_pt, preset
 
@@ -1402,6 +1436,8 @@ def show_help_dialog():
         "verificare e confermare). La completezza e' indicata dal COLORE\n"
         "del punto: GRIGIO = completo, GIALLO = incompleto (niente piu'\n"
         "note TextDot; quelle legacy vengono rimosse su conferma).\n"
+        "Due punti vengono fusi (sovrascrittura) solo se a meno di 0.25mm;\n"
+        "oltre quella soglia restano distinti (v4.8).\n"
         "Formule: min/max ammessi, es. min(L/2, (T+(P+S))/2).\n"
         "Nel dialogo, 'Preleva -> X' / 'Preleva -> Y' (v4.5): seleziona\n"
         "quote-funzione e/o punti gia' annotati; ne accoda la formula nel\n"
@@ -1642,11 +1678,12 @@ def main():
         x  = pt.X
         y  = pt.Y
 
-        # === Chiavi geometriche del nuovo punto ===
+        # === Chiave geometrica del nuovo punto (etichetta, non identita') ===
         point_key = make_point_key(x, y)
 
-        # === Sovrascrittura: cerca e cancella eventuali duplicati ===
-        old_pt_obj, preset = find_existing_by_key(point_key, tol)
+        # === Sovrascrittura: cerca e cancella SOLO un punto realmente
+        #     coincidente (distanza < OVERWRITE_TOL = 0.25mm, v4.8) ===
+        old_pt_obj, preset = find_existing_by_key(x, y)
         is_overwrite = (old_pt_obj is not None)
         if is_overwrite:
             n_removed = delete_existing(old_pt_obj)
