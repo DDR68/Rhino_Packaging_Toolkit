@@ -2,19 +2,23 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PKG ESPORTA PDF VETTORIALE  v1.4  -  Rhino 7 / 8  (IronPython 2.7)
+#  PKG ESPORTA PDF VETTORIALE  v1.5  -  Rhino 7 / 8  (IronPython 2.7)
 #
-#  Novita' v1.4:
-#    - DIALOGO RINNOVATO: tabella con colore input (Rhino) e
-#      trattamento output per-layer (Spot o CMYK).
-#      Spot: nome colore, RGB editabili, sovrastampa per-layer.
-#      CMYK: valori C/M/Y/K editabili (default da conversione,
-#      override per crocini K100, cliche' etc.).
-#      Default: tutti Spot. Margine in basso.
+#  Novita' v1.5:
+#    - REGOLE DI MAPPATURA: ogni colore input (Rhino) viene rimappato
+#      su un layer PDF di output con nome, colore, spessore e
+#      sovrastampa definiti. Regole di default hardcoded.
+#    - DIALOGO RINNOVATO: tabella Input -> Output con layer di
+#      destinazione, tipo colore (Spot/CMYK), valori colore,
+#      spessore linea per-layer, sovrastampa per-layer.
+#    - COMPATIBILITA' ILLUSTRATOR: OCG con /Intent /Design e
+#      /Usage/CreatorInfo cosi' Illustrator riconosce i livelli
+#      nativamente (non solo Acrobat Reader).
 #    - PDF CMYK + Separation color space + ExtGState sovrastampa.
 #
-#  v1.3: dialogo base, CMYK, spot, overprint.
-#  v1.2: testo riempito/centrato, frecce, gap linea quota.
+#  v1.4: dialogo per-layer, CMYK/Spot, overprint.
+#  v1.3: dialogo base. v1.2: testo riempito/centrato, frecce,
+#  gap linea quota.
 #  v1.1: quote e testi. v1.0: curve vettoriali.
 # =============================================================================
 
@@ -43,6 +47,53 @@ ARROW_WIDTH_RATIO = 0.35
 
 
 # =============================================================================
+# REGOLE DI MAPPATURA (default)
+#
+# Ogni regola mappa un colore input (RGB Rhino) a un layer PDF di output.
+# match_color: RGB da cercare (0-255)
+# match_tolerance: distanza euclidea massima per il match
+# output_layer: nome del livello PDF di destinazione
+# color_type: 'spot' o 'cmyk'
+# spot_name: nome colore spot (usato se color_type == 'spot')
+# rgb: RGB di anteprima spot (0-255)
+# cmyk: valori CMYK (0.0-1.0) (usato se color_type == 'cmyk')
+# line_width: spessore linea in mm
+# overprint: sovrastampa (True/False)
+# =============================================================================
+DEFAULT_RULES = [
+    {
+        'match_color': (255, 0, 255),
+        'match_tolerance': 15,
+        'output_layer': 'Tracciato',
+        'color_type': 'spot',
+        'spot_name': 'Tracciato',
+        'rgb': (255, 0, 255),
+        'line_width': 0.25,
+        'overprint': True,
+    },
+    {
+        'match_color': (0, 190, 255),
+        'match_tolerance': 25,
+        'output_layer': 'Quote',
+        'color_type': 'spot',
+        'spot_name': 'Quote',
+        'rgb': (0, 190, 255),
+        'line_width': 0.15,
+        'overprint': True,
+    },
+    {
+        'match_color': (0, 0, 0),
+        'match_tolerance': 10,
+        'output_layer': 'Crocini',
+        'color_type': 'cmyk',
+        'cmyk': (1.0, 1.0, 1.0, 1.0),
+        'line_width': 0.10,
+        'overprint': False,
+    },
+]
+
+
+# =============================================================================
 # UTILITA'
 # =============================================================================
 def get_unit_scale():
@@ -51,6 +102,21 @@ def get_unit_scale():
 
 def fmt(v):
     return "%.4f" % v
+
+def strip_rtf(text):
+    """Estrae testo plain da una stringa RTF.
+    Alcune annotazioni Rhino 7/8 memorizzano testo in formato RTF;
+    se passato a CreateTextOutlines il markup viene renderizzato."""
+    if not text or not text.startswith("{\\rtf"):
+        return text
+    try:
+        rtb = WinForms.RichTextBox()
+        rtb.Rtf = text
+        result = rtb.Text
+        rtb.Dispose()
+        return result
+    except Exception:
+        return text
 
 def get_dimstyle(geo):
     try:
@@ -62,26 +128,60 @@ def get_dimstyle(geo):
     return sc.doc.DimStyles.Current
 
 def rgb_to_cmyk(r, g, b):
-    """RGB 0-255 -> CMYK 0.0-1.0."""
+    """RGB 0-255 -> CMYK 0.0-1.0.
+    Nero puro -> nero di registro (C100 M100 Y100 K100)
+    per comparire su tutte le lastre colore."""
     r1, g1, b1 = r / 255.0, g / 255.0, b / 255.0
     k = 1.0 - max(r1, g1, b1)
     if k >= 0.9999:
-        return (0.0, 0.0, 0.0, 1.0)
+        return (1.0, 1.0, 1.0, 1.0)
     d = 1.0 - k
     return ((1.0 - r1 - k) / d, (1.0 - g1 - k) / d,
             (1.0 - b1 - k) / d, k)
 
 
+def get_display_color(obj):
+    """Restituisce il colore effettivo dell'oggetto (da oggetto o layer)."""
+    src = obj.Attributes.ColorSource
+    if src == Rhino.DocObjects.ObjectColorSource.ColorFromObject:
+        return obj.Attributes.ObjectColor
+    return sc.doc.Layers[obj.Attributes.LayerIndex].Color
+
+
+def color_distance(c1, c2):
+    """Distanza euclidea RGB."""
+    return math.sqrt(
+        (c1[0] - c2[0]) ** 2 +
+        (c1[1] - c2[1]) ** 2 +
+        (c1[2] - c2[2]) ** 2)
+
+
+def find_matching_rule(r, g, b):
+    """Trova la regola con match migliore, None se nessuna entro tolleranza."""
+    best = None
+    best_dist = float('inf')
+    for rule in DEFAULT_RULES:
+        dist = color_distance((r, g, b), rule['match_color'])
+        tol = rule.get('match_tolerance', 10)
+        if dist <= tol and dist < best_dist:
+            best = rule
+            best_dist = dist
+    return best
+
+
 # =============================================================================
-# DIALOGO IMPOSTAZIONI
+# DIALOGO IMPOSTAZIONI v1.5
 # =============================================================================
 class LayerRow(object):
-    """Controlli per una riga layer nel dialogo."""
-    def __init__(self, parent, y, name, color):
-        self.name = name
-        self.input_color = Drawing.Color.FromArgb(255, color.R, color.G, color.B)
+    """Controlli per una riga di mappatura nel dialogo."""
+    def __init__(self, parent, y, input_rgb, input_label, rule):
+        self.input_rgb = input_rgb
+        self.rule = rule
 
-        # Preview colore input (dall'oggetto)
+        ir, ig, ib = input_rgb
+        self.input_color = Drawing.Color.FromArgb(255, ir, ig, ib)
+
+        # -- Colore input (swatch) --
         pnl = WinForms.Panel()
         pnl.Location = Drawing.Point(6, y + 4)
         pnl.Size = Drawing.Size(18, 18)
@@ -89,73 +189,110 @@ class LayerRow(object):
         pnl.BorderStyle = WinForms.BorderStyle.FixedSingle
         parent.Controls.Add(pnl)
 
-        # Nome layer
+        # -- Label input (nome layer Rhino) --
         lbl = WinForms.Label()
-        lbl.Text = name
+        lbl.Text = input_label
         lbl.Location = Drawing.Point(28, y + 5)
-        lbl.Size = Drawing.Size(86, 18)
+        lbl.Size = Drawing.Size(78, 18)
         parent.Controls.Add(lbl)
 
-        # Tipo output
+        # -- Freccia --
+        arr = WinForms.Label()
+        arr.Text = unichr(0x2192)  # freccia destra
+        arr.Location = Drawing.Point(108, y + 4)
+        arr.Size = Drawing.Size(16, 18)
+        arr.Font = Drawing.Font(arr.Font.FontFamily, 10.0)
+        parent.Controls.Add(arr)
+
+        # -- Nome layer output (editable) --
+        self.txt_output = WinForms.TextBox()
+        self.txt_output.Text = rule.get('output_layer', input_label)
+        self.txt_output.Location = Drawing.Point(126, y + 2)
+        self.txt_output.Size = Drawing.Size(82, 22)
+        parent.Controls.Add(self.txt_output)
+
+        # -- Tipo output --
         self.combo = WinForms.ComboBox()
         self.combo.Items.AddRange(System.Array[System.Object](
             ["Spot", "CMYK"]))
-        self.combo.SelectedIndex = 0
+        ct = rule.get('color_type', 'spot')
+        self.combo.SelectedIndex = 0 if ct == 'spot' else 1
         self.combo.DropDownStyle = WinForms.ComboBoxStyle.DropDownList
-        self.combo.Location = Drawing.Point(118, y + 2)
+        self.combo.Location = Drawing.Point(212, y + 2)
         self.combo.Size = Drawing.Size(56, 22)
         self.combo.SelectedIndexChanged += self.on_type_changed
         parent.Controls.Add(self.combo)
 
-        # --- Controlli Spot: Nome + R/G/B ---
-        self.spot_name = WinForms.TextBox()
-        self.spot_name.Text = name
-        self.spot_name.Location = Drawing.Point(180, y + 2)
-        self.spot_name.Size = Drawing.Size(88, 22)
-        parent.Controls.Add(self.spot_name)
-
+        # -- Controlli Spot: R/G/B --
+        spot_rgb = rule.get('rgb', input_rgb)
         x = 274
         self.lbl_r = self._lbl(parent, "R", x, y + 5)
-        self.nud_r = self._nud(parent, color.R, 0, 255, x + 13, y + 2)
-        self.lbl_g = self._lbl(parent, "G", x + 60, y + 5)
-        self.nud_g = self._nud(parent, color.G, 0, 255, x + 73, y + 2)
-        self.lbl_b = self._lbl(parent, "B", x + 120, y + 5)
-        self.nud_b = self._nud(parent, color.B, 0, 255, x + 133, y + 2)
+        self.nud_r = self._nud(parent, spot_rgb[0], 0, 255, x + 13, y + 2, 42)
+        self.lbl_g = self._lbl(parent, "G", x + 58, y + 5)
+        self.nud_g = self._nud(parent, spot_rgb[1], 0, 255, x + 71, y + 2, 42)
+        self.lbl_b = self._lbl(parent, "B", x + 116, y + 5)
+        self.nud_b = self._nud(parent, spot_rgb[2], 0, 255, x + 129, y + 2, 42)
 
-        # --- Controlli CMYK: C/M/Y/K (stessa posizione, nascosti) ---
-        cmyk = rgb_to_cmyk(color.R, color.G, color.B)
-        x2 = 180
+        # -- Controlli CMYK: C/M/Y/K (stessa posizione, nascosti) --
+        rule_cmyk = rule.get('cmyk', None)
+        if rule_cmyk is None:
+            rule_cmyk = rgb_to_cmyk(ir, ig, ib)
+        x2 = 274
         self.lbl_c = self._lbl(parent, "C", x2, y + 5)
-        self.nud_c = self._nud(parent, int(cmyk[0] * 100 + 0.5), 0, 100, x2 + 13, y + 2)
-        self.lbl_m = self._lbl(parent, "M", x2 + 60, y + 5)
-        self.nud_m = self._nud(parent, int(cmyk[1] * 100 + 0.5), 0, 100, x2 + 73, y + 2)
-        self.lbl_y2 = self._lbl(parent, "Y", x2 + 120, y + 5)
-        self.nud_y = self._nud(parent, int(cmyk[2] * 100 + 0.5), 0, 100, x2 + 133, y + 2)
-        self.lbl_k = self._lbl(parent, "K", x2 + 180, y + 5)
-        self.nud_k = self._nud(parent, int(cmyk[3] * 100 + 0.5), 0, 100, x2 + 193, y + 2)
+        self.nud_c = self._nud(parent, int(rule_cmyk[0] * 100 + 0.5),
+                               0, 100, x2 + 13, y + 2, 40)
+        self.lbl_m = self._lbl(parent, "M", x2 + 56, y + 5)
+        self.nud_m = self._nud(parent, int(rule_cmyk[1] * 100 + 0.5),
+                               0, 100, x2 + 69, y + 2, 40)
+        self.lbl_y2 = self._lbl(parent, "Y", x2 + 112, y + 5)
+        self.nud_y = self._nud(parent, int(rule_cmyk[2] * 100 + 0.5),
+                               0, 100, x2 + 125, y + 2, 40)
+        self.lbl_k = self._lbl(parent, "K", x2 + 168, y + 5)
+        self.nud_k = self._nud(parent, int(rule_cmyk[3] * 100 + 0.5),
+                               0, 100, x2 + 181, y + 2, 40)
 
-        # OVP sempre visibile (sia Spot che CMYK)
+        # -- Spessore linea (mm) --
+        lw = rule.get('line_width', DEFAULT_LINE_WIDTH_MM)
+        x_lw = 506
+        self.lbl_lw = self._lbl(parent, "lw", x_lw, y + 5)
+        self.nud_lw = WinForms.NumericUpDown()
+        self.nud_lw.Location = Drawing.Point(x_lw + 18, y + 2)
+        self.nud_lw.Size = Drawing.Size(50, 22)
+        self.nud_lw.Minimum = System.Decimal(0)
+        self.nud_lw.Maximum = System.Decimal(5)
+        self.nud_lw.DecimalPlaces = 2
+        self.nud_lw.Increment = System.Decimal(5) / System.Decimal(100)
+        self.nud_lw.Value = System.Decimal(int(round(max(0.0, min(5.0, lw)) * 100))) / System.Decimal(100)
+        parent.Controls.Add(self.nud_lw)
+
+        lbl_mm = WinForms.Label()
+        lbl_mm.Text = "mm"
+        lbl_mm.Location = Drawing.Point(x_lw + 70, y + 5)
+        lbl_mm.Size = Drawing.Size(22, 16)
+        parent.Controls.Add(lbl_mm)
+
+        # -- OVP (sovrastampa) --
         self.chk_ovp = WinForms.CheckBox()
         self.chk_ovp.Text = "OVP"
-        self.chk_ovp.Location = Drawing.Point(470, y + 3)
+        self.chk_ovp.Location = Drawing.Point(602, y + 3)
         self.chk_ovp.Size = Drawing.Size(50, 20)
-        self.chk_ovp.Checked = True
+        self.chk_ovp.Checked = rule.get('overprint', True)
         parent.Controls.Add(self.chk_ovp)
 
-        self._show_cmyk(False)
+        self._show_cmyk(ct == 'cmyk')
 
     def _lbl(self, parent, text, x, y):
         lbl = WinForms.Label()
         lbl.Text = text
         lbl.Location = Drawing.Point(x, y)
-        lbl.Size = Drawing.Size(13, 16)
+        lbl.Size = Drawing.Size(14, 16)
         parent.Controls.Add(lbl)
         return lbl
 
-    def _nud(self, parent, val, lo, hi, x, y):
+    def _nud(self, parent, val, lo, hi, x, y, w=44):
         nud = WinForms.NumericUpDown()
         nud.Location = Drawing.Point(x, y)
-        nud.Size = Drawing.Size(44, 22)
+        nud.Size = Drawing.Size(w, 22)
         nud.Minimum = System.Decimal(lo)
         nud.Maximum = System.Decimal(hi)
         nud.DecimalPlaces = 0
@@ -167,7 +304,7 @@ class LayerRow(object):
         for c in [self.lbl_c, self.nud_c, self.lbl_m, self.nud_m,
                   self.lbl_y2, self.nud_y, self.lbl_k, self.nud_k]:
             c.Visible = show
-        for c in [self.spot_name, self.lbl_r, self.nud_r,
+        for c in [self.lbl_r, self.nud_r,
                   self.lbl_g, self.nud_g, self.lbl_b, self.nud_b]:
             c.Visible = not show
 
@@ -176,16 +313,20 @@ class LayerRow(object):
 
     def get_settings(self):
         ovp = self.chk_ovp.Checked
+        out_name = self.txt_output.Text.strip() or "Layer"
+        lw = float(self.nud_lw.Value)
         if self.combo.SelectedIndex == 0:  # Spot
             r = int(self.nud_r.Value)
             g = int(self.nud_g.Value)
             b = int(self.nud_b.Value)
             return {
                 'type': 'spot',
-                'spot_name': self.spot_name.Text or self.name,
+                'output_layer': out_name,
+                'spot_name': out_name,  # nome layer = nome spot
                 'rgb': (r, g, b),
                 'cmyk': rgb_to_cmyk(r, g, b),
                 'overprint': ovp,
+                'line_width': lw,
             }
         else:  # CMYK
             c = float(self.nud_c.Value) / 100.0
@@ -194,41 +335,51 @@ class LayerRow(object):
             k = float(self.nud_k.Value) / 100.0
             return {
                 'type': 'cmyk',
+                'output_layer': out_name,
                 'cmyk': (c, m, y, k),
                 'overprint': ovp,
+                'line_width': lw,
             }
 
 
 class ExportDialog(WinForms.Form):
-    def __init__(self, layer_names_colors):
+    """Dialogo v1.5: mappatura colore input -> layer output."""
+    def __init__(self, rows_data):
+        """rows_data: [(input_rgb, input_label, matched_rule), ...]"""
         self.result = None
         self.layer_rows = []
+        self.rows_data = rows_data
 
-        self.Text = "PKG Esporta PDF Vettoriale"
+        self.Text = "PKG Esporta PDF Vettoriale  v1.5"
         self.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
         self.MaximizeBox = False
         self.MinimizeBox = False
         self.StartPosition = WinForms.FormStartPosition.CenterScreen
 
-        n = len(layer_names_colors)
+        n = len(rows_data)
         row_h = 28
         header_h = 50
-        list_h = min(max(n * row_h + 8, 50), 350)  # max 350px, poi scroll
+        list_h = min(max(n * row_h + 8, 50), 350)
         footer_h = 80
-        self.ClientSize = Drawing.Size(540, header_h + list_h + footer_h)
+        self.ClientSize = Drawing.Size(670, header_h + list_h + footer_h)
 
         # --- Intestazione ---
         lbl_title = WinForms.Label()
-        lbl_title.Text = "Mappatura colori di output"
+        lbl_title.Text = "Mappatura colori input  " + unichr(0x2192) + "  livelli PDF output"
         lbl_title.Font = Drawing.Font(lbl_title.Font, Drawing.FontStyle.Bold)
         lbl_title.Location = Drawing.Point(10, 8)
         lbl_title.AutoSize = True
         self.Controls.Add(lbl_title)
 
         # Colonne header
-        headers = [("Input", 6), ("Layer", 28), ("Output", 122),
-                   ("Definizione colore", 260)]
+        headers = [("Input", 6), ("Layer in", 28),
+                   ("", 110),
+                   ("Layer out", 126), ("Tipo", 214),
+                   ("Colore", 280),
+                   ("Spessore", 510), ("", 602)]
         for txt, x in headers:
+            if not txt:
+                continue
             lh = WinForms.Label()
             lh.Text = txt
             lh.Location = Drawing.Point(x, 28)
@@ -240,23 +391,22 @@ class ExportDialog(WinForms.Form):
         # --- Panel layer ---
         panel = WinForms.Panel()
         panel.Location = Drawing.Point(0, header_h)
-        panel.Size = Drawing.Size(530, list_h)
+        panel.Size = Drawing.Size(660, list_h)
         panel.AutoScroll = True
         panel.BorderStyle = WinForms.BorderStyle.FixedSingle
         self.Controls.Add(panel)
 
-        for i, (name, color) in enumerate(layer_names_colors):
-            lr = LayerRow(panel, i * row_h, name, color)
+        for i, (input_rgb, input_label, rule) in enumerate(rows_data):
+            lr = LayerRow(panel, i * row_h, input_rgb, input_label, rule)
             self.layer_rows.append(lr)
 
         # --- Footer ---
         y_foot = header_h + list_h + 8
 
-        # Separatore
         sep = WinForms.Label()
         sep.BorderStyle = WinForms.BorderStyle.Fixed3D
         sep.Location = Drawing.Point(10, y_foot)
-        sep.Size = Drawing.Size(510, 2)
+        sep.Size = Drawing.Size(640, 2)
         self.Controls.Add(sep)
 
         # Margine
@@ -285,7 +435,7 @@ class ExportDialog(WinForms.Form):
         btn_ok = WinForms.Button()
         btn_ok.Text = "Esporta"
         btn_ok.Size = Drawing.Size(80, 28)
-        btn_ok.Location = Drawing.Point(340, y_foot + 40)
+        btn_ok.Location = Drawing.Point(470, y_foot + 40)
         btn_ok.Click += self.on_ok
         self.Controls.Add(btn_ok)
         self.AcceptButton = btn_ok
@@ -293,18 +443,24 @@ class ExportDialog(WinForms.Form):
         btn_cancel = WinForms.Button()
         btn_cancel.Text = "Annulla"
         btn_cancel.Size = Drawing.Size(80, 28)
-        btn_cancel.Location = Drawing.Point(430, y_foot + 40)
+        btn_cancel.Location = Drawing.Point(560, y_foot + 40)
         btn_cancel.Click += self.on_cancel
         self.Controls.Add(btn_cancel)
         self.CancelButton = btn_cancel
 
     def on_ok(self, sender, args):
         layers = {}
-        for lr in self.layer_rows:
-            layers[lr.name] = lr.get_settings()
+        color_map = {}
+        for i, lr in enumerate(self.layer_rows):
+            s = lr.get_settings()
+            out_name = s['output_layer']
+            layers[out_name] = s
+            # Mappa il colore input -> layer output
+            color_map[lr.input_rgb] = out_name
         self.result = {
             'margin': float(self.margin_box.Value),
             'layers': layers,
+            'color_map': color_map,
         }
         self.DialogResult = WinForms.DialogResult.OK
         self.Close()
@@ -361,6 +517,15 @@ def curves_from_annotation(geo):
     fill = []
     dimstyle = get_dimstyle(geo)
 
+    # Salta annotazioni con markup RTF grezzo
+    try:
+        pt = geo.PlainText
+        if pt and pt.strip().startswith("{\\rtf"):
+            print("  [SKIP] Annotazione RTF ignorata.")
+            return (stroke, fill)
+    except Exception:
+        pass
+
     if isinstance(geo, TextEntity):
         try:
             result = geo.CreateCurves(dimstyle, False)
@@ -401,6 +566,7 @@ def curves_from_annotation(geo):
                 pass
             if not text:
                 text = geo.PlainText
+            text = strip_rtf(text)
             if text:
                 font_name = "Arial"
                 try:
@@ -670,15 +836,8 @@ def curve_to_pdf_path(curve, ox, oy, s, fill_mode=False):
 def get_obj_layer_name(obj):
     return sc.doc.Layers[obj.Attributes.LayerIndex].Name
 
-def get_line_width_mm(obj):
-    pw = obj.Attributes.PlotWeight
-    if pw <= 0:
-        pw = sc.doc.Layers[obj.Attributes.LayerIndex].PlotWeight
-    if pw <= 0:
-        pw = DEFAULT_LINE_WIDTH_MM
-    return pw
-
-def get_dash_pattern_pt(obj, unit_scale):
+def get_dash_pattern_mm(obj, unit_scale):
+    """Pattern tratteggio in mm (il CTM nel content stream converte a pt)."""
     lt_idx = obj.Attributes.LinetypeIndex
     if lt_idx < 0:
         lt_idx = sc.doc.Layers[obj.Attributes.LayerIndex].LinetypeIndex
@@ -689,14 +848,40 @@ def get_dash_pattern_pt(obj, unit_scale):
         return []
     pattern = []
     for i in range(lt.SegmentCount):
+        seg_len = None
         try:
             result = lt.GetSegment(i)
-            seg_len = result[1]
+            seg_len = abs(float(result[0]))
         except Exception:
-            seg_len = lt.PatternLength / lt.SegmentCount
-        pt_len = abs(seg_len) * unit_scale * MM_TO_PT
-        pattern.append(pt_len)
+            pass
+        if seg_len is None or seg_len < 0.001:
+            seg_len = abs(lt.PatternLength / lt.SegmentCount)
+        mm_len = seg_len * unit_scale
+        pattern.append(max(mm_len, 0.01))
     return pattern
+
+
+def pdf_safe_name(name):
+    """Escape di un nome per PDF Name object.
+    '#' va escaped PRIMA degli altri caratteri speciali."""
+    out = []
+    for ch in name:
+        o = ord(ch)
+        if ch == '#':
+            out.append('#23')
+        elif ch == ' ':
+            out.append('#20')
+        elif ch == '(':
+            out.append('#28')
+        elif ch == ')':
+            out.append('#29')
+        elif ch == '/':
+            out.append('#2F')
+        elif o < 33 or o > 126:
+            out.append('#%02X' % o)
+        else:
+            out.append(ch)
+    return ''.join(out)
 
 
 # =============================================================================
@@ -704,10 +889,28 @@ def get_dash_pattern_pt(obj, unit_scale):
 # =============================================================================
 def build_pdf(objects, settings):
     margin_mm = settings['margin']
-    layer_settings = settings['layers']  # {name: {type, cmyk, spot_name, rgb, overprint}}
+    layer_settings = settings['layers']
+    color_map = settings['color_map']
 
     unit_scale = get_unit_scale()
-    scale = unit_scale * MM_TO_PT
+
+    # Mappa ogni oggetto al suo layer output tramite il colore
+    obj_output_layer = {}
+    for obj in objects:
+        col = get_display_color(obj)
+        key = (col.R, col.G, col.B)
+        out_layer = color_map.get(key, None)
+        if out_layer is None:
+            # Fallback: prova con tolleranza minima
+            best_dist = float('inf')
+            for map_rgb, map_layer in color_map.items():
+                d = color_distance(key, map_rgb)
+                if d < best_dist:
+                    best_dist = d
+                    out_layer = map_layer
+            if out_layer is None:
+                out_layer = "Altro"
+        obj_output_layer[id(obj)] = out_layer
 
     # Bounding box
     bbox = BoundingBox.Empty
@@ -729,35 +932,58 @@ def build_pdf(objects, settings):
     oy = -bbox.Min.Y + margin_mm / unit_scale
     print("Pagina: %.1f x %.1f mm" % (w_mm, h_mm))
 
-    # Raccolta spot colors con RGB per alternativo fedele
-    spot_list = []   # [(spot_name, r, g, b)]  valori 0-1
-    spot_cs = {}     # layer_name -> "CS_N"
-    spot_ovp = {}    # layer_name -> bool
-    for lname, ls in layer_settings.items():
-        if ls['type'] == 'spot':
+    # Layer output ordinati (preserva ordine di apparizione)
+    layer_names_ordered = []
+    layer_ocg = {}
+    for obj in objects:
+        ln = obj_output_layer[id(obj)]
+        if ln not in layer_ocg:
+            layer_ocg[ln] = "OC_%d" % len(layer_names_ordered)
+            layer_names_ordered.append(ln)
+
+    # Raccolta spot colors
+    spot_list = []
+    spot_cs = {}
+    spot_ovp = {}
+    for lname in layer_names_ordered:
+        ls = layer_settings.get(lname)
+        if ls and ls['type'] == 'spot':
             cs_key = "CS_%d" % len(spot_list)
-            rgb = ls['rgb']  # (R, G, B) 0-255
+            rgb = ls['rgb']
             spot_list.append((ls['spot_name'],
                               rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0))
             spot_cs[lname] = cs_key
             spot_ovp[lname] = ls.get('overprint', True)
 
-    # Content stream
-    cl = ["q", "1 J", "1 j"]
-    n_crv = n_ann = 0
-
+    # Raggruppa oggetti per layer output
+    layer_objects = {}
     for obj in objects:
         geo = obj.Geometry
         if geo is None:
             continue
-        lname = get_obj_layer_name(obj)
-        lw_pt = get_line_width_mm(obj) * MM_TO_PT
-        dash = get_dash_pattern_pt(obj, unit_scale)
-        cl.append("%.4f w" % lw_pt)
-        cl.append("[%s] 0 d" % " ".join("%.2f" % d for d in dash) if dash else "[] 0 d")
+        ln = obj_output_layer[id(obj)]
+        if ln not in layer_objects:
+            layer_objects[ln] = []
+        layer_objects[ln].append(obj)
 
-        # Colore
+    # Scala in mm
+    scale_mm = unit_scale
+
+    # Content stream: CTM mm->pt + BDC/EMC per layer
+    cl = ["q", "1 J", "1 j"]
+    cl.append("%.6f 0 0 %.6f 0 0 cm" % (MM_TO_PT, MM_TO_PT))
+
+    n_crv = n_ann = 0
+
+    for lname in layer_names_ordered:
+        if lname not in layer_objects:
+            continue
+
+        cl.append("/OC /%s BDC" % layer_ocg[lname])
+
+        # Colore layer
         is_spot = lname in spot_cs
+        ls = layer_settings.get(lname)
         if is_spot:
             cs = spot_cs[lname]
             if spot_ovp.get(lname, True):
@@ -769,7 +995,6 @@ def build_pdf(objects, settings):
             cl.append("/%s cs" % cs)
             cl.append("1 scn")
         else:
-            ls = layer_settings.get(lname)
             cmyk_ovp = ls.get('overprint', False) if ls else False
             if cmyk_ovp:
                 cl.append("/GSOVP gs")
@@ -778,39 +1003,59 @@ def build_pdf(objects, settings):
             if ls and 'cmyk' in ls:
                 c, m, y, k = ls['cmyk']
             else:
-                # Fallback: converti colore oggetto
-                src = obj.Attributes.ColorSource
-                if src == Rhino.DocObjects.ObjectColorSource.ColorFromLayer:
-                    col = sc.doc.Layers[obj.Attributes.LayerIndex].Color
-                else:
-                    col = obj.Attributes.ObjectColor
-                c, m, y, k = rgb_to_cmyk(col.R, col.G, col.B)
+                c, m, y, k = 0, 0, 0, 1
             cl.append("%.4f %.4f %.4f %.4f K" % (c, m, y, k))
             cl.append("%.4f %.4f %.4f %.4f k" % (c, m, y, k))
 
-        if isinstance(geo, Curve):
-            for seg in segments_from_curve(geo):
-                cl.extend(curve_to_pdf_path(seg, ox, oy, scale, False))
-            n_crv += 1
-            continue
+        # Spessore dal dialogo (override per-layer)
+        lw_mm = DEFAULT_LINE_WIDTH_MM
+        if ls and 'line_width' in ls:
+            lw_mm = ls['line_width']
 
-        if isinstance(geo, AnnotationBase):
-            s_crvs, f_crvs = curves_from_annotation(geo)
-            for crv in s_crvs:
-                for seg in segments_from_curve(crv):
-                    cl.extend(curve_to_pdf_path(seg, ox, oy, scale, False))
-            if f_crvs:
-                for crv in f_crvs:
-                    if isinstance(crv, PolyCurve):
-                        nc = crv.ToNurbsCurve()
-                        if nc is not None:
-                            crv = nc
-                    cl.extend(curve_to_pdf_path(crv, ox, oy, scale, True))
-                cl.append("f*")
-            n_ann += 1
+        for obj in layer_objects[lname]:
+            geo = obj.Geometry
+            dash = get_dash_pattern_mm(obj, unit_scale)
+
+            cl.append("%.4f w" % lw_mm)
+            if dash:
+                cl.append("[%s] 0 d" % " ".join("%.4f" % d for d in dash))
+            else:
+                cl.append("[] 0 d")
+
+            if isinstance(geo, Curve):
+                for seg in segments_from_curve(geo):
+                    cl.extend(curve_to_pdf_path(
+                        seg, ox, oy, scale_mm, False))
+                n_crv += 1
+
+            elif isinstance(geo, AnnotationBase):
+                s_crvs, f_crvs = curves_from_annotation(geo)
+                for crv in s_crvs:
+                    for seg in segments_from_curve(crv):
+                        cl.extend(curve_to_pdf_path(
+                            seg, ox, oy, scale_mm, False))
+                if f_crvs:
+                    for crv in f_crvs:
+                        if isinstance(crv, PolyCurve):
+                            nc = crv.ToNurbsCurve()
+                            if nc is not None:
+                                crv = nc
+                        cl.extend(curve_to_pdf_path(
+                            crv, ox, oy, scale_mm, True))
+                    cl.append("f*")
+                n_ann += 1
+
+        cl.append("EMC")
 
     cl.append("Q")
-    print("Processati: %d curve, %d annotazioni." % (n_crv, n_ann))
+    print("Processati: %d curve, %d annotazioni. Livelli output: %d." % (
+        n_crv, n_ann, len(layer_names_ordered)))
+    for lname in layer_names_ordered:
+        ls = layer_settings.get(lname)
+        lw = ls.get('line_width', DEFAULT_LINE_WIDTH_MM) if ls else DEFAULT_LINE_WIDTH_MM
+        tp = ls.get('type', '?') if ls else '?'
+        n_obj = len(layer_objects.get(lname, []))
+        print("  '%s': %s, lw=%.2fmm, %d oggetti" % (lname, tp, lw, n_obj))
     if spot_list:
         print("Spot: %s" % ", ".join(
             "%s (R%.0f G%.0f B%.0f)" % (s[0], s[1]*255, s[2]*255, s[3]*255)
@@ -818,11 +1063,12 @@ def build_pdf(objects, settings):
 
     stream = "\n".join(cl)
     print("Stream: %d righe, %d bytes." % (len(cl), len(stream)))
-    # Prime 15 righe del content stream per diagnostica
     for line in cl[:15]:
         print("  | %s" % line)
 
-    # Assemblaggio PDF -- solo 6 oggetti, tint transform inline
+    # =========================================================================
+    # ASSEMBLAGGIO PDF con OCG potenziato per compatibilita' Illustrator
+    # =========================================================================
     buf = bytearray()
     off = {}
     def w(t):
@@ -830,26 +1076,40 @@ def build_pdf(objects, settings):
     def p():
         return len(buf)
 
-    n_obj = 6
+    n_layers = len(layer_names_ordered)
+    n_obj = 6 + n_layers  # 1-6 fissi + OCG per layer
 
-    w("%%PDF-1.4\n")
+    w("%%PDF-1.5\n")
+    w("%%\xe2\xe3\xcf\xd3\n")  # marker binario (best practice)
 
+    # Obj 1: Catalog con OCProperties potenziato
     off[1] = p()
-    w("1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n")
+    w("1 0 obj\n<< /Type /Catalog /Pages 2 0 R\n")
+    if n_layers > 0:
+        ocg_refs = " ".join("%d 0 R" % (7 + i) for i in range(n_layers))
+        w("   /OCProperties <<\n")
+        w("     /OCGs [%s]\n" % ocg_refs)
+        w("     /D << /Name (Livelli)\n")
+        w("          /Intent /Design\n")
+        w("          /Order [%s]\n" % ocg_refs)
+        w("          /ON [%s]\n" % ocg_refs)
+        w("          /ListMode /AllPages >>\n")
+        w("   >>\n")
+    w(">>\nendobj\n")
+
     off[2] = p()
     w("2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n")
 
-    # Page con Resources (tint transform inline nell'array Separation)
+    # Obj 3: Page con Resources
     off[3] = p()
-    w("3 0 obj\n")
-    w("<< /Type /Page /Parent 2 0 R\n")
+    w("3 0 obj\n<< /Type /Page /Parent 2 0 R\n")
     w("   /MediaBox [0 0 %.2f %.2f]\n" % (pw, ph))
     w("   /Contents 4 0 R\n")
     w("   /Resources <<\n")
     if spot_list:
         w("     /ColorSpace <<\n")
         for i, (sn, sr, sg, sb) in enumerate(spot_list):
-            safe = sn.replace(" ", "#20").replace("(", "#28").replace(")", "#29")
+            safe = pdf_safe_name(sn)
             w("       /CS_%d [/Separation /%s /DeviceRGB\n" % (i, safe))
             w("         << /FunctionType 2 /Domain [0 1]\n")
             w("            /C0 [1 1 1]\n")
@@ -860,22 +1120,41 @@ def build_pdf(objects, settings):
     w("       /GSOVP 5 0 R\n")
     w("       /GSNOVP 6 0 R\n")
     w("     >>\n")
-    w("   >>\n")
-    w(">>\n")
-    w("endobj\n")
+    if n_layers > 0:
+        w("     /Properties <<\n")
+        for i, ln in enumerate(layer_names_ordered):
+            w("       /%s %d 0 R\n" % (layer_ocg[ln], 7 + i))
+        w("     >>\n")
+    w("   >>\n>>\nendobj\n")
 
+    # Obj 4: Content stream
     off[4] = p()
     w("4 0 obj\n<< /Length %d >>\n" % len(stream))
     w("stream\n")
     w(stream)
-    w("\nendstream\n")
-    w("endobj\n")
+    w("\nendstream\nendobj\n")
 
+    # Obj 5-6: ExtGState
     off[5] = p()
     w("5 0 obj\n<< /Type /ExtGState /OP true /op true /OPM 1 >>\nendobj\n")
     off[6] = p()
     w("6 0 obj\n<< /Type /ExtGState /OP false /op false >>\nendobj\n")
 
+    # Obj 7+: OCG objects con Intent e Usage per Illustrator
+    for i, ln in enumerate(layer_names_ordered):
+        obj_num = 7 + i
+        off[obj_num] = p()
+        safe_name = ln.replace("\\", "\\\\").replace("(", "\\(").replace(")", "\\)")
+        w("%d 0 obj\n" % obj_num)
+        w("<< /Type /OCG\n")
+        w("   /Name (%s)\n" % safe_name)
+        w("   /Intent [/View /Design]\n")
+        w("   /Usage << /CreatorInfo <<\n")
+        w("     /Creator (PKG Esporta PDF Vettoriale)\n")
+        w("     /Subtype /Artwork >> >>\n")
+        w(">>\nendobj\n")
+
+    # Xref
     xref = p()
     total = n_obj + 1
     w("xref\n0 %d\n" % total)
@@ -910,23 +1189,44 @@ def main():
         return
     print("%d oggetti selezionati." % len(objects))
 
-    # Layer unici — colore dall'oggetto (non dal layer)
-    layer_set = {}
+    # Raggruppa oggetti per colore display (chiave di mappatura)
+    color_groups = {}   # (R,G,B) -> [obj, ...]
+    color_labels = {}   # (R,G,B) -> label (nome primo layer Rhino incontrato)
     for obj in objects:
-        idx = obj.Attributes.LayerIndex
-        name = sc.doc.Layers[idx].Name
-        if name not in layer_set:
-            src = obj.Attributes.ColorSource
-            if src == Rhino.DocObjects.ObjectColorSource.ColorFromObject:
-                layer_set[name] = obj.Attributes.ObjectColor
-            else:
-                layer_set[name] = sc.doc.Layers[idx].Color
-    layer_list = sorted(layer_set.items(), key=lambda x: x[0])
+        col = get_display_color(obj)
+        key = (col.R, col.G, col.B)
+        if key not in color_groups:
+            color_groups[key] = []
+            color_labels[key] = get_obj_layer_name(obj)
+        color_groups[key].append(obj)
 
-    for name, color in layer_list:
-        print("  '%s': R=%d G=%d B=%d" % (name, color.R, color.G, color.B))
+    print("Colori unici trovati: %d" % len(color_groups))
 
-    dlg = ExportDialog(layer_list)
+    # Per ogni colore unico, cerca una regola di default
+    rows_data = []
+    for rgb in sorted(color_groups.keys()):
+        label = color_labels[rgb]
+        rule = find_matching_rule(*rgb)
+        if rule:
+            print("  R%d G%d B%d (%s) -> regola '%s'" % (
+                rgb[0], rgb[1], rgb[2], label, rule['output_layer']))
+            rows_data.append((rgb, label, dict(rule)))  # copia per sicurezza
+        else:
+            print("  R%d G%d B%d (%s) -> nessuna regola (default)" % (
+                rgb[0], rgb[1], rgb[2], label))
+            # Default: spot con nome del layer Rhino
+            default = {
+                'output_layer': label,
+                'color_type': 'spot',
+                'spot_name': label,
+                'rgb': rgb,
+                'line_width': DEFAULT_LINE_WIDTH_MM,
+                'overprint': True,
+            }
+            rows_data.append((rgb, label, default))
+
+    # Mostra dialogo
+    dlg = ExportDialog(rows_data)
     if dlg.ShowDialog() != WinForms.DialogResult.OK or dlg.result is None:
         print("Annullato.")
         return
