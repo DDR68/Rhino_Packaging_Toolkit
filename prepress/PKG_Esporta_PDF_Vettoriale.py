@@ -372,7 +372,7 @@ class ExportDialog(WinForms.Form):
         self.Controls.Add(lbl_title)
 
         # Colonne header
-        headers = [("Input", 6), ("Layer in", 28),
+        headers = [("Input", 6), ("Layer in", 42),
                    ("", 110),
                    ("Layer out", 126), ("Tipo", 214),
                    ("Colore", 280),
