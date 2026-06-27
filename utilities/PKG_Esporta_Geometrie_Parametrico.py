@@ -2,8 +2,23 @@
 # -*- coding: utf-8 -*-
 """
 Script: Esporta_Geometrie_Parametrico.py
-Versione: 5.5
+Versione: 5.6
 Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscriptsyntax)
+
+NOVITA V.5.6 rispetto a V.5.5:
+  - [Variabili parametriche] Il TXT esportato dichiara ora in testa le
+    VARIABILI PARAMETRICHE del modello con valore di Default, Min, Max e
+    Descrizione. Le variabili sono estratte automaticamente dalle formule
+    dei punti parametrici (lettere maiuscole singole: L, P, A, S, C,
+    T, E, ...) e presentate in un dialogo Eto dove l'utente le compila.
+    I campi partono VUOTI (i valori sono specifici del modello); le
+    descrizioni hanno solo il nome generico (materiali e vincoli sono a
+    carico dell'utente). I campi lasciati vuoti sono emessi come '-' nel
+    TXT.
+  - [Prompt LLM] Il prompt embedded istruisce l'LLM a leggere default e
+    range dalla sezione '# VARIABILI PARAMETRICHE', a usarli come valori
+    iniziali per GetNumber e a validare l'input contro il range con avviso
+    e ri-richiesta se fuori range.
 
 UNIFICA:
   - Aggiorna_UserText_Parametrico (propagazione punti parametrici -> curve)
@@ -145,6 +160,7 @@ import Rhino.DocObjects as rd
 import scriptcontext as sc
 import math
 import os
+import re
 
 
 # ============================================================
@@ -201,6 +217,48 @@ CYAN_CH_TOL    = 40
 
 
 # ============================================================
+#  COSTANTI VARIABILI PARAMETRICHE  [v5.6]
+# ============================================================
+
+# Variabili packaging riconosciute. L'ordine e' quello di presentazione
+# nel dialogo e nel TXT. Se nelle formule compaiono variabili non in
+# lista, vengono aggiunte in coda (con placeholder vuoti).
+PACKAGING_VARS_ORDER = ["L", "P", "A", "S", "C", "T", "E"]
+
+# Placeholder per il dialogo. I valori sono tutti a 0: vanno compilati
+# dall'utente col valore del MODELLO corrente (cambiano da modello a
+# modello). Le descrizioni sono i nomi standard; l'utente puo'
+# sovrascriverle nel dialogo e vengono salvate nel TXT.
+PACKAGING_VAR_HINTS = {
+    "L": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Lunghezza"},
+    "P": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Profondita'"},
+    "A": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Altezza"},
+    "S": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Spessore Cartone"},
+    "C": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Lembo di Incollatura"},
+    "T": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Lembo di Chiusura"},
+    "E": {"default": 0.0, "min": 0.0, "max": 0.0,
+           "desc": "Bisello / Scarico Interno"},
+}
+
+# Pattern per estrarre variabili packaging dalle formule parametriche:
+# lettera MAIUSCOLA singola non preceduta/seguita da lettera/underscore,
+# cosi' 'PKG' non matcha ma 'L', 'L/2', 'P+S' si'.
+_VAR_RE = re.compile(r'(?<![A-Za-z_])([A-Z])(?![A-Za-z_])')
+
+# Variabili ammesse nelle espressioni di Min/Max (range).
+# Derivato da PACKAGING_VARS_ORDER: L P A S C T E.
+# Solo queste lettere maiuscole sono accettate nelle formule;
+# qualsiasi altra lettera genera un errore di validazione.
+ALLOWED_RANGE_VARS = set(PACKAGING_VARS_ORDER)   # {L,P,A,S,C,T,E}
+
+
+# ============================================================
 #  HELP DIALOG (Eto.Forms)
 # ============================================================
 
@@ -210,7 +268,7 @@ def show_help():
     import Eto.Drawing as ed
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.5 - Guida"
+    dlg.Title = "Esporta Geometrie Parametrico v5.6 - Guida"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(680, 560)
     dlg.Resizable = True
@@ -220,7 +278,7 @@ def show_help():
     layout.DefaultSpacing = ed.Size(4, 4)
 
     title = ef.Label()
-    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.5"
+    title.Text = "ESPORTA GEOMETRIE PARAMETRICO v5.6"
     title.Font = ed.Font(ed.SystemFont.Bold, 13)
     layout.AddRow(title)
     layout.AddRow(ef.Label(Text=""))
@@ -275,7 +333,7 @@ def show_help():
     layout.AddRow(ef.Label(Text=""))
 
     sec_mir = ef.Label()
-    sec_mir.Text = "SPECCHIATURA (v5.5)"
+    sec_mir.Text = "SPECCHIATURA (v5.6)"
     sec_mir.Font = ed.Font(ed.SystemFont.Bold, 11)
     layout.AddRow(sec_mir)
 
@@ -331,7 +389,7 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     result = {"export": False, "include_prompt": True}
 
     dlg = ef.Dialog()
-    dlg.Title = "Esporta Geometrie Parametrico v5.5 - Report"
+    dlg.Title = "Esporta Geometrie Parametrico v5.6 - Report"
     dlg.Padding = ed.Padding(16)
     dlg.MinimumSize = ed.Size(480, 320)
     dlg.Resizable = False
@@ -397,6 +455,194 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
     dlg.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow)
 
     return result["export"], result["include_prompt"]
+
+
+def show_variables_dialog(found_vars, inferred_defaults=None):
+    """Mostra un dialogo Eto dove l'utente conferma/modifica i valori
+    di default e i range (min, max) delle variabili parametriche.
+
+    found_vars         : lista ordinata di nomi variabile estratti dalle formule.
+    inferred_defaults  : {var: valore} dedotti dal disegno (pre-compilano il
+                         campo Default). None o {} = nessun pre-fill.
+    Ritorna una lista di dict [{"name","default","min","max","desc"}, ...]
+    oppure None se l'utente preme 'Salta' (nessuna sezione variabili nel TXT).
+    Lista vuota se non ci sono variabili (non viene mostrato il dialogo)."""
+    import Eto.Forms as ef
+    import Eto.Drawing as ed
+
+    if not found_vars:
+        return []
+
+    if inferred_defaults is None:
+        inferred_defaults = {}
+
+    result = {"ok": False, "data": []}
+
+    dlg = ef.Dialog()
+    dlg.Title = "Esporta Geometrie Parametrico v5.6 - Variabili"
+    dlg.Padding = ed.Padding(10)
+    dlg.Resizable = False
+
+    layout = ef.DynamicLayout()
+    layout.Spacing = ed.Size(4, 2)
+    layout.DefaultSpacing = ed.Size(4, 2)
+
+    title = ef.Label()
+    title.Text = "Variabili parametriche rilevate nelle formule"
+    title.Font = ed.Font(ed.SystemFont.Bold, 11)
+    layout.AddRow(title)
+
+    note = ef.Label()
+    note.Text = ("Conferma o modifica i valori di default e il range\n"
+                 "ammissibile. Saranno scritti in testa al TXT esportato\n"
+                 "e usati dall'LLM per validare l'input dello script.\n"
+                 "Min e Max accettano anche formule (es. P-3, L/2+S).\n"
+                 "Lettere ammesse: L P A S C T E (forzate maiuscole).")
+    layout.AddRow(note)
+
+    # Intestazione colonne
+    hdr_var = ef.Label(Text="Var")
+    hdr_var.Font = ed.Font(ed.SystemFont.Bold, 9)
+    hdr_var.Width = 24
+    hdr_def = ef.Label(Text="Default")
+    hdr_def.Font = ed.Font(ed.SystemFont.Bold, 9)
+    hdr_min = ef.Label(Text="Min")
+    hdr_min.Font = ed.Font(ed.SystemFont.Bold, 9)
+    hdr_max = ef.Label(Text="Max")
+    hdr_max.Font = ed.Font(ed.SystemFont.Bold, 9)
+    hdr_desc = ef.Label(Text="Descrizione")
+    hdr_desc.Font = ed.Font(ed.SystemFont.Bold, 9)
+    layout.AddRow(hdr_var, hdr_def, hdr_min, hdr_max, hdr_desc)
+
+    # Righe editabili, una per variabile
+    def _hint_str(val):
+        """0.0 -> '' (campo vuoto): l'utente compila solo quelli che
+        servono per il modello corrente."""
+        if val is None or val == 0.0:
+            return ""
+        return str(val)
+
+    rows_ui = []
+    for vname in found_vars:
+        hint = PACKAGING_VAR_HINTS.get(vname, {})
+
+        # Il default viene dal DISEGNO (inferred_defaults) se disponibile,
+        # altrimenti dal hint (che e' 0 = vuoto).
+        inferred_val = inferred_defaults.get(vname)
+
+        lbl = ef.Label(Text=vname)
+        lbl.Font = ed.Font(ed.SystemFont.Bold, 10)
+        lbl.Width = 24
+
+        tb_def = ef.TextBox()
+        if inferred_val is not None and inferred_val != 0.0:
+            tb_def.Text = str(inferred_val)
+        else:
+            tb_def.Text = _hint_str(hint.get("default"))
+        tb_def.Width = 64
+
+        tb_min = ef.TextBox()
+        tb_min.Text = _hint_str(hint.get("min"))
+        tb_min.Width = 64
+
+        tb_max = ef.TextBox()
+        tb_max.Text = _hint_str(hint.get("max"))
+        tb_max.Width = 64
+
+        tb_desc = ef.TextBox()
+        tb_desc.Text = hint.get("desc", "")
+        tb_desc.Width = 170
+
+        layout.AddRow(lbl, tb_def, tb_min, tb_max, tb_desc)
+        rows_ui.append((vname, tb_def, tb_min, tb_max, tb_desc))
+
+    btn_ok = ef.Button(Text="Conferma e esporta")
+    def on_ok(s, e):
+        def _parse_float(txt):
+            try:
+                return float(txt.strip().replace(",", "."))
+            except Exception:
+                return None
+
+        def _parse_range(txt):
+            """Parsa un campo Min/Max: accetta un numero oppure una
+            espressione parametrica (es. 'P-3', 'L/2+S').
+            Lettere forzate a maiuscolo; ammesse solo L P A S C T E.
+            Valida anche la sintassi dell'espressione con eval.
+            Ritorna (valore, errore):
+              valore = float | str | None
+              errore = str | None"""
+            txt = txt.strip()
+            if not txt:
+                return None, None
+            # Prova come float
+            try:
+                return float(txt.replace(",", ".")), None
+            except ValueError:
+                pass
+            # E' un'espressione: forza maiuscolo
+            expr = txt.upper()
+            # Valida: solo lettere ammesse
+            bad = set()
+            for ch in expr:
+                if ch.isalpha() and ch not in ALLOWED_RANGE_VARS:
+                    bad.add(ch)
+            if bad:
+                return None, ("lettera '%s' non ammessa (solo %s)" %
+                              ("".join(sorted(bad)),
+                               " ".join(sorted(ALLOWED_RANGE_VARS))))
+            # Valida sintassi: eval con tutte le variabili a 1
+            try:
+                ns = {}
+                for v in ALLOWED_RANGE_VARS:
+                    ns[v] = 1.0
+                float(eval(expr, {"__builtins__": {}}, ns))
+            except Exception:
+                return None, ("espressione '%s' non valida" % expr)
+            return expr, None
+
+        data = []
+        errors = []
+        for (vname, tb_def, tb_min, tb_max, tb_desc) in rows_ui:
+            min_val, min_err = _parse_range(tb_min.Text)
+            max_val, max_err = _parse_range(tb_max.Text)
+            if min_err:
+                errors.append("Min di %s: %s" % (vname, min_err))
+            if max_err:
+                errors.append("Max di %s: %s" % (vname, max_err))
+            data.append({
+                "name":    vname,
+                "default": _parse_float(tb_def.Text),
+                "min":     min_val,
+                "max":     max_val,
+                "desc":    tb_desc.Text.strip(),
+            })
+
+        if errors:
+            ef.MessageBox.Show(
+                "\n".join(errors),
+                "Variabili - errore di validazione")
+            return   # resta aperto, l'utente corregge
+
+        result["data"] = data
+        result["ok"] = True
+        dlg.Close()
+    btn_ok.Click += on_ok
+
+    btn_skip = ef.Button(Text="Salta (nessuna sezione variabili)")
+    def on_skip(s, e):
+        result["ok"] = False
+        dlg.Close()
+    btn_skip.Click += on_skip
+
+    layout.AddRow(None, btn_ok, btn_skip)
+
+    dlg.Content = layout
+    dlg.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow)
+
+    if result["ok"]:
+        return result["data"]
+    return None
 
 
 # ============================================================
@@ -530,6 +776,118 @@ def _collect_param_points():
         }
 
     return points_map, skipped_orphan, True
+
+
+def _extract_variables_from_formulas(points_map):
+    """Scansiona X_param e Y_param di tutti i punti parametrici e
+    restituisce la lista ORDINATA di variabili packaging trovate.
+    L'ordine segue PACKAGING_VARS_ORDER; eventuali variabili extra
+    (non in lista) vengono aggiunte in coda, ordinate alfabeticamente."""
+    found = set()
+    for _key, entry in points_map.items():
+        for field in ("param_x", "param_y"):
+            formula = entry.get(field, "")
+            for m in _VAR_RE.finditer(formula):
+                found.add(m.group(1))
+    # Ordina: prima le note, poi le extra
+    ordered = [v for v in PACKAGING_VARS_ORDER if v in found]
+    extra = sorted(found - set(PACKAGING_VARS_ORDER))
+    ordered.extend(extra)
+    return ordered
+
+
+def _try_solve_linear(formula, var, target):
+    """Risolve formula(var) = target per 'var', assumendo linearita'.
+    Metodo a due punti: valuta f(var=0) e f(var=1) per ricavare
+    intercetta e pendenza; poi verifica il risultato ricalcolando.
+    Ritorna il valore di 'var' arrotondato, o None se non riesce
+    (formula non lineare, errore di sintassi, divisione per zero)."""
+    try:
+        ns0 = {var: 0.0}
+        ns1 = {var: 1.0}
+        f0 = float(eval(formula, {"__builtins__": {}}, ns0))
+        f1 = float(eval(formula, {"__builtins__": {}}, ns1))
+        slope = f1 - f0
+        if abs(slope) < 1e-12:
+            return None
+        result = (target - f0) / slope
+        # Verifica: ricalcola con il risultato e controlla lo scarto
+        ns_v = {var: result}
+        check = float(eval(formula, {"__builtins__": {}}, ns_v))
+        if abs(check - target) > 0.01:
+            return None   # formula non lineare in var
+        return round(result, ROUND_DIGITS)
+    except Exception:
+        return None
+
+
+def _solve_variables_from_points(points_map):
+    """Ricava i valori delle variabili parametriche dai punti,
+    confrontando le coordinate reali con le espressioni parametriche.
+
+    Ogni punto ha (real_x, real_y) e (X_param, Y_param): per esempio
+    se real_x = 100 e X_param = 'L/2', allora L = 200.
+
+    Strategia a due passate (iterativa):
+      1. Risolve le formule a UNA sola incognita (es. L/2 = 100 -> L = 200)
+      2. Sostituisce i valori noti nelle formule rimanenti e risolve quelle
+         ridotte a una incognita, ripetendo finche' non si risolvono piu'
+         variabili.
+
+    Ritorna { "L": 200.0, "P": 150.0, "S": 0.5, ... }."""
+
+    # Raccogli tutte le coppie (formula, valore_reale)
+    equations = []
+    for key, entry in points_map.items():
+        real_x, real_y = key
+        for field, real_val in (("param_x", real_x), ("param_y", real_y)):
+            formula = entry.get(field, "").strip()
+            if not formula or formula == "?":
+                continue
+            # Solo formule che contengono almeno una variabile
+            if _VAR_RE.search(formula):
+                equations.append((formula, real_val))
+
+    solved = {}
+
+    # Passata 1: formule a singola variabile
+    for formula, value in equations:
+        vars_in = set(_VAR_RE.findall(formula))
+        if len(vars_in) != 1:
+            continue
+        var = list(vars_in)[0]
+        if var in solved:
+            continue
+        val = _try_solve_linear(formula, var, value)
+        if val is not None:
+            solved[var] = val
+
+    # Passate successive: sostituisci i noti e risolvi le rimanenti
+    max_iter = 5
+    changed = True
+    while changed and max_iter > 0:
+        changed = False
+        max_iter -= 1
+        for formula, value in equations:
+            vars_in = set(_VAR_RE.findall(formula))
+            unknown = vars_in - set(solved.keys())
+            if len(unknown) != 1:
+                continue
+            var = list(unknown)[0]
+            if var in solved:
+                continue
+            # Sostituisci i valori noti nella formula
+            subst = formula
+            for sv, sval in solved.items():
+                subst = re.sub(
+                    r'(?<![A-Za-z_])' + sv + r'(?![A-Za-z_])',
+                    "%.6f" % sval, subst)
+            val = _try_solve_linear(subst, var, value)
+            if val is not None:
+                solved[var] = val
+                changed = True
+
+    return solved
 
 
 def _lookup_param(points_map, x, y):
@@ -1125,7 +1483,7 @@ def _show_blocking_error(messages):
                 "\n\nUn blocco ammette UN solo asse: linea continua "
                 "(simmetria) OPPURE tratteggiata (patella).")
         Rhino.UI.Dialogs.ShowMessage(
-            body, "Esporta Geometrie Parametrico v5.5 - Errore")
+            body, "Esporta Geometrie Parametrico v5.6 - Errore")
     except Exception:
         pass
 
@@ -1497,6 +1855,32 @@ def _mirror_summary_lines(steps):
     return out
 
 
+def _variables_summary_lines(var_data):
+    """Righe commentate '# ...' che dichiarano le variabili parametriche
+    con default e range ammissibili. Vanno in testa al TXT, prima dei
+    dati e dopo gli header. Se var_data e' None o vuota, niente righe."""
+    if not var_data:
+        return []
+    out = []
+    out.append("# VARIABILI PARAMETRICHE (valori di default e range "
+               "ammissibili per il modello)")
+    out.append("#   Var  Default     Min         Max         Descrizione")
+    def _f(x):
+        if x is None:
+            return "-"
+        if isinstance(x, float) or isinstance(x, int):
+            if x == 0.0:
+                return "-"
+            return "%.2f" % x
+        # Espressione parametrica (stringa, es. 'P-3')
+        return str(x)
+    for v in var_data:
+        out.append("#   %-3s  %-10s  %-10s  %-10s  %s" % (
+            v["name"], _f(v["default"]), _f(v["min"]),
+            _f(v["max"]), v.get("desc", "")))
+    return out
+
+
 def _llm_prompt_header():
     """Testo del prompt da anteporre al TXT quando l'utente lo richiede.
     Rende il file autoportante: chi lo riceve (un LLM) ha davanti sia le
@@ -1597,10 +1981,17 @@ SPECCHIATURA E PULIZIA (ULTIME operazioni dello script)
 
 COSA DEVI PRODURRE
 Uno script che:
-- definisca in testa le variabili packaging (almeno L, P, A, S; aggiungi
-  C, T, E se compaiono nelle formule) come valori di DEFAULT e le CHIEDA
-  all'avvio con Rhino.Input.RhinoGet.GetNumber (Invio = valore di
-  default), cosi' che modificandole la fustella si riscali;
+- legga i VALORI DI DEFAULT e i RANGE ammissibili di ogni variabile
+  dalla sezione '# VARIABILI PARAMETRICHE' dei dati qui sotto. Se la
+  sezione e' assente, definisca almeno L, P, A, S con default sensati;
+- definisca in testa le variabili packaging come valori di DEFAULT e le
+  CHIEDA all'avvio con Rhino.Input.RhinoGet.GetNumber (Invio = valore di
+  default). Se il valore inserito e' fuori dal range Min-Max dichiarato,
+  lo script deve AVVISARE ('Valore fuori range: min-max consigliato') e
+  RICHIEDERE l'input, accettando comunque se l'utente insiste.
+  ATTENZIONE: Min e Max possono essere numeri OPPURE espressioni
+  parametriche (es. 'P-3', 'L/2'). Se sono espressioni, valutale con
+  i valori correnti delle variabili gia' inserite prima di confrontare;
 - costruisca tutte le geometrie dalle loro formule;
 - come ULTIME operazioni: ricostruisca l'asse parametrico, applichi le
   specchiature (scatola intera, meta' unite sull'asse) e infine CANCELLI
@@ -1628,7 +2019,7 @@ inesattezza prima di restituire la versione finale.
 === GEOMETRIE E RAPPORTI PARAMETRICI DEL PACKAGING ===
 """)
 
-def export_objects(curve_objs, point_objs, include_prompt=False):
+def export_objects(curve_objs, point_objs, include_prompt=False, var_data=None):
     """Genera il contenuto TXT e lo salva."""
     lines = []
     rows = []
@@ -1762,6 +2153,8 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
         doc_name, bbox_str, n_curves, n_points, n_total, n_exploded, unit))
     lines.append("# Tipo: T=Taglio C=Cordone M=MezzoTaglio F=Foratore P=Point")
     lines.append("# Angoli archi: convenzione con segno (CW = negativo)")
+    for _vl in _variables_summary_lines(var_data):
+        lines.append(_vl)
     lines.append("# Blocco: lista dei passi di specchiatura (CSV) cui la curva "
                  "partecipa; per le linee-asse e' il passo che definiscono.")
     lines.append("# Colonne: " + "  ".join(COLUMNS))
@@ -1812,7 +2205,7 @@ def export_objects(curve_objs, point_objs, include_prompt=False):
 
 def main():
     print("=" * 60)
-    print("ESPORTA GEOMETRIE PARAMETRICO v5.5")
+    print("ESPORTA GEOMETRIE PARAMETRICO v5.6")
     print("=" * 60)
 
     selected = list(sc.doc.Objects.GetSelectedObjects(False, False))
@@ -1851,8 +2244,29 @@ def main():
         do_export, include_prompt = True, True
 
     if do_export:
+        # v5.6: estrazione variabili parametriche dalle formule dei punti
+        var_data = None
+        points_map, _sk, _lok = _collect_param_points()
+        if points_map:
+            found_vars = _extract_variables_from_formulas(points_map)
+            if found_vars:
+                # Deduce i default risolvendo le equazioni formula=coordinata
+                solved = _solve_variables_from_points(points_map)
+                print("Variabili parametriche rilevate: %s" % (
+                    ", ".join(found_vars)))
+                if solved:
+                    print("Default dedotti dal disegno: %s" % (
+                        ", ".join("%s=%.4g" % (k, v)
+                                  for k, v in sorted(solved.items()))))
+                var_data = show_variables_dialog(found_vars,
+                                                inferred_defaults=solved)
+                if var_data is not None:
+                    print("Variabili confermate: %d" % len(var_data))
+                else:
+                    print("Sezione variabili saltata dall'utente.")
         print("-" * 60)
-        export_objects(curve_objs, point_objs, include_prompt=include_prompt)
+        export_objects(curve_objs, point_objs,
+                       include_prompt=include_prompt, var_data=var_data)
     else:
         print("-" * 60)
         print("Propagazione completata. Nessun export su file.")
