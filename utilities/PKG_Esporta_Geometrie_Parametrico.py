@@ -8,17 +8,27 @@ Compatibilita: Rhino 7 / Rhino 8 - IronPython 2.7 - RhinoCommon (no rhinoscripts
 NOVITA V.5.6 rispetto a V.5.5:
   - [Variabili parametriche] Il TXT esportato dichiara ora in testa le
     VARIABILI PARAMETRICHE del modello con valore di Default, Min, Max e
-    Descrizione. Le variabili sono estratte automaticamente dalle formule
-    dei punti parametrici (lettere maiuscole singole: L, P, A, S, C,
-    T, E, ...) e presentate in un dialogo Eto dove l'utente le compila.
-    I campi partono VUOTI (i valori sono specifici del modello); le
-    descrizioni hanno solo il nome generico (materiali e vincoli sono a
-    carico dell'utente). I campi lasciati vuoti sono emessi come '-' nel
-    TXT.
-  - [Prompt LLM] Il prompt embedded istruisce l'LLM a leggere default e
-    range dalla sezione '# VARIABILI PARAMETRICHE', a usarli come valori
-    iniziali per GetNumber e a validare l'input contro il range con avviso
-    e ri-richiesta se fuori range.
+    Descrizione. Le variabili (L, P, A, S, C, T, E) sono estratte dalle
+    formule dei punti parametrici e presentate in un dialogo Eto.
+  - [Default dedotti] I valori di Default sono dedotti automaticamente
+    dal disegno risolvendo le equazioni formula=coordinata reale dei
+    punti (anche per formule composte come 'L/2+S', per sostituzione
+    iterativa). L'utente puo' sovrascriverli.
+  - [Min/Max parametrici] I campi Min e Max accettano numeri OPPURE
+    espressioni parametriche (es. 'P-3' per evitare i sormonti).
+    Le lettere sono forzate maiuscole e ammesse solo quelle in
+    ALLOWED_RANGE_VARS; la sintassi e' validata con eval.
+  - [Descrizioni nel TXT] Le descrizioni dei parametri sono editabili
+    nel dialogo e salvate nel TXT, cosi' cambiano da modello a modello.
+  - [Dimensioni interne utili] Nuova sezione del dialogo con 3 caselle
+    (L, P, A) per le formule dell'ingombro netto interno della scatola,
+    salvate nel TXT come '# DIMENSIONI INTERNE UTILI'.
+  - [Dialogo compatto] Layout a tabella con larghezze fisse: campi
+    editabili accostati alle lettere, finestra a dimensione fissa.
+  - [Prompt LLM] Istruisce l'LLM a leggere default e range dalla sezione
+    '# VARIABILI PARAMETRICHE' (valutando i Min/Max-formula con i valori
+    correnti), a validare l'input con avviso e ri-richiesta, e a calcolare
+    e riportare le dimensioni interne utili.
 
 UNIFICA:
   - Aggiorna_UserText_Parametrico (propagazione punti parametrici -> curve)
@@ -459,153 +469,148 @@ def show_report_and_ask_export(n_aggiornate, n_saltate, reasons_dict,
 
 def show_variables_dialog(found_vars, inferred_defaults=None):
     """Mostra un dialogo Eto dove l'utente conferma/modifica i valori
-    di default e i range (min, max) delle variabili parametriche.
+    di default e i range (min, max) delle variabili parametriche, e
+    definisce le formule delle DIMENSIONI INTERNE UTILI (L, P, A).
 
     found_vars         : lista ordinata di nomi variabile estratti dalle formule.
     inferred_defaults  : {var: valore} dedotti dal disegno (pre-compilano il
                          campo Default). None o {} = nessun pre-fill.
-    Ritorna una lista di dict [{"name","default","min","max","desc"}, ...]
+    Ritorna un dict {"vars": [...], "interne": {"L":..,"P":..,"A":..}}
     oppure None se l'utente preme 'Salta' (nessuna sezione variabili nel TXT).
-    Lista vuota se non ci sono variabili (non viene mostrato il dialogo)."""
+    Dict con liste vuote se non ci sono variabili (dialogo non mostrato)."""
     import Eto.Forms as ef
     import Eto.Drawing as ed
 
     if not found_vars:
-        return []
+        return {"vars": [], "interne": {}}
 
     if inferred_defaults is None:
         inferred_defaults = {}
 
-    result = {"ok": False, "data": []}
+    result = {"ok": False, "data": [], "interne": {}}
+
+    # Larghezze fisse delle colonne (px). La Descrizione e' l'unica larga.
+    W_VAR, W_NUM, W_DESC = 28, 70, 190
 
     dlg = ef.Dialog()
     dlg.Title = "Esporta Geometrie Parametrico v5.6 - Variabili"
     dlg.Padding = ed.Padding(10)
     dlg.Resizable = False
 
-    layout = ef.DynamicLayout()
-    layout.Spacing = ed.Size(4, 2)
-    layout.DefaultSpacing = ed.Size(4, 2)
-
-    title = ef.Label()
-    title.Text = "Variabili parametriche rilevate nelle formule"
-    title.Font = ed.Font(ed.SystemFont.Bold, 11)
-    layout.AddRow(title)
-
-    note = ef.Label()
-    note.Text = ("Conferma o modifica i valori di default e il range\n"
-                 "ammissibile. Saranno scritti in testa al TXT esportato\n"
-                 "e usati dall'LLM per validare l'input dello script.\n"
-                 "Min e Max accettano anche formule (es. P-3, L/2+S).\n"
-                 "Lettere ammesse: L P A S C T E (forzate maiuscole).")
-    layout.AddRow(note)
-
-    # Intestazione colonne
-    hdr_var = ef.Label(Text="Var")
-    hdr_var.Font = ed.Font(ed.SystemFont.Bold, 9)
-    hdr_var.Width = 24
-    hdr_def = ef.Label(Text="Default")
-    hdr_def.Font = ed.Font(ed.SystemFont.Bold, 9)
-    hdr_min = ef.Label(Text="Min")
-    hdr_min.Font = ed.Font(ed.SystemFont.Bold, 9)
-    hdr_max = ef.Label(Text="Max")
-    hdr_max.Font = ed.Font(ed.SystemFont.Bold, 9)
-    hdr_desc = ef.Label(Text="Descrizione")
-    hdr_desc.Font = ed.Font(ed.SystemFont.Bold, 9)
-    layout.AddRow(hdr_var, hdr_def, hdr_min, hdr_max, hdr_desc)
-
-    # Righe editabili, una per variabile
     def _hint_str(val):
-        """0.0 -> '' (campo vuoto): l'utente compila solo quelli che
-        servono per il modello corrente."""
+        """0.0 / None -> '' (campo vuoto)."""
         if val is None or val == 0.0:
             return ""
         return str(val)
 
+    def _mk_lbl(text, bold, w):
+        lb = ef.Label(Text=text)
+        if bold:
+            lb.Font = ed.Font(ed.SystemFont.Bold, 9)
+        lb.Width = w
+        return lb
+
+    def _mk_tb(text, w):
+        tb = ef.TextBox()
+        tb.Text = text
+        tb.Width = w
+        return tb
+
+    # ---- Tabella variabili (TableLayout: colonne a larghezza fissa) ----
+    grid = ef.TableLayout()
+    grid.Spacing = ed.Size(4, 2)
+
+    # Intestazione
+    grid.Rows.Add(ef.TableRow(
+        _mk_lbl("Var", True, W_VAR),
+        _mk_lbl("Default", True, W_NUM),
+        _mk_lbl("Min", True, W_NUM),
+        _mk_lbl("Max", True, W_NUM),
+        _mk_lbl("Descrizione", True, W_DESC)))
+
     rows_ui = []
     for vname in found_vars:
         hint = PACKAGING_VAR_HINTS.get(vname, {})
-
-        # Il default viene dal DISEGNO (inferred_defaults) se disponibile,
-        # altrimenti dal hint (che e' 0 = vuoto).
         inferred_val = inferred_defaults.get(vname)
 
         lbl = ef.Label(Text=vname)
         lbl.Font = ed.Font(ed.SystemFont.Bold, 10)
-        lbl.Width = 24
+        lbl.Width = W_VAR
 
-        tb_def = ef.TextBox()
         if inferred_val is not None and inferred_val != 0.0:
-            tb_def.Text = str(inferred_val)
+            tb_def = _mk_tb(str(inferred_val), W_NUM)
         else:
-            tb_def.Text = _hint_str(hint.get("default"))
-        tb_def.Width = 64
+            tb_def = _mk_tb(_hint_str(hint.get("default")), W_NUM)
+        tb_min = _mk_tb(_hint_str(hint.get("min")), W_NUM)
+        tb_max = _mk_tb(_hint_str(hint.get("max")), W_NUM)
+        tb_desc = _mk_tb(hint.get("desc", ""), W_DESC)
 
-        tb_min = ef.TextBox()
-        tb_min.Text = _hint_str(hint.get("min"))
-        tb_min.Width = 64
-
-        tb_max = ef.TextBox()
-        tb_max.Text = _hint_str(hint.get("max"))
-        tb_max.Width = 64
-
-        tb_desc = ef.TextBox()
-        tb_desc.Text = hint.get("desc", "")
-        tb_desc.Width = 170
-
-        layout.AddRow(lbl, tb_def, tb_min, tb_max, tb_desc)
+        grid.Rows.Add(ef.TableRow(lbl, tb_def, tb_min, tb_max, tb_desc))
         rows_ui.append((vname, tb_def, tb_min, tb_max, tb_desc))
 
-    btn_ok = ef.Button(Text="Conferma e esporta")
+    # ---- Sezione DIMENSIONI INTERNE UTILI ----
+    grid_int = ef.TableLayout()
+    grid_int.Spacing = ed.Size(4, 2)
+    grid_int.Rows.Add(ef.TableRow(
+        _mk_lbl("Dim", True, W_VAR),
+        _mk_lbl("Formula", True, W_NUM + 60),
+        _mk_lbl("Descrizione", True, W_DESC - 30)))
+
+    interne_ui = {}
+    _INT_DESC = {"L": "Lunghezza interna utile",
+                 "P": "Profondita' interna utile",
+                 "A": "Altezza interna utile"}
+    for dname in ("L", "P", "A"):
+        lbl = ef.Label(Text=dname)
+        lbl.Font = ed.Font(ed.SystemFont.Bold, 10)
+        lbl.Width = W_VAR
+        tb_f = _mk_tb("", W_NUM + 60)
+        lbl_d = _mk_lbl(_INT_DESC[dname], False, W_DESC - 30)
+        grid_int.Rows.Add(ef.TableRow(lbl, tb_f, lbl_d))
+        interne_ui[dname] = tb_f
+
+    # ---- Validazione (chiusura su ALLOWED_RANGE_VARS) ----
+    def _parse_float(txt):
+        try:
+            return float(txt.strip().replace(",", "."))
+        except Exception:
+            return None
+
+    def _parse_expr(txt, allow_empty=True):
+        """Numero o espressione parametrica. Lettere a maiuscolo, ammesse
+        solo quelle in ALLOWED_RANGE_VARS, sintassi validata con eval.
+        Ritorna (valore, errore): valore = float|str|None."""
+        txt = txt.strip()
+        if not txt:
+            return (None, None) if allow_empty else (None, "campo vuoto")
+        try:
+            return float(txt.replace(",", ".")), None
+        except ValueError:
+            pass
+        expr = txt.upper()
+        bad = set()
+        for ch in expr:
+            if ch.isalpha() and ch not in ALLOWED_RANGE_VARS:
+                bad.add(ch)
+        if bad:
+            return None, ("lettera '%s' non ammessa (solo %s)" %
+                          ("".join(sorted(bad)),
+                           " ".join(sorted(ALLOWED_RANGE_VARS))))
+        try:
+            ns = {}
+            for v in ALLOWED_RANGE_VARS:
+                ns[v] = 1.0
+            float(eval(expr, {"__builtins__": {}}, ns))
+        except Exception:
+            return None, ("espressione '%s' non valida" % expr)
+        return expr, None
+
     def on_ok(s, e):
-        def _parse_float(txt):
-            try:
-                return float(txt.strip().replace(",", "."))
-            except Exception:
-                return None
-
-        def _parse_range(txt):
-            """Parsa un campo Min/Max: accetta un numero oppure una
-            espressione parametrica (es. 'P-3', 'L/2+S').
-            Lettere forzate a maiuscolo; ammesse solo L P A S C T E.
-            Valida anche la sintassi dell'espressione con eval.
-            Ritorna (valore, errore):
-              valore = float | str | None
-              errore = str | None"""
-            txt = txt.strip()
-            if not txt:
-                return None, None
-            # Prova come float
-            try:
-                return float(txt.replace(",", ".")), None
-            except ValueError:
-                pass
-            # E' un'espressione: forza maiuscolo
-            expr = txt.upper()
-            # Valida: solo lettere ammesse
-            bad = set()
-            for ch in expr:
-                if ch.isalpha() and ch not in ALLOWED_RANGE_VARS:
-                    bad.add(ch)
-            if bad:
-                return None, ("lettera '%s' non ammessa (solo %s)" %
-                              ("".join(sorted(bad)),
-                               " ".join(sorted(ALLOWED_RANGE_VARS))))
-            # Valida sintassi: eval con tutte le variabili a 1
-            try:
-                ns = {}
-                for v in ALLOWED_RANGE_VARS:
-                    ns[v] = 1.0
-                float(eval(expr, {"__builtins__": {}}, ns))
-            except Exception:
-                return None, ("espressione '%s' non valida" % expr)
-            return expr, None
-
         data = []
         errors = []
         for (vname, tb_def, tb_min, tb_max, tb_desc) in rows_ui:
-            min_val, min_err = _parse_range(tb_min.Text)
-            max_val, max_err = _parse_range(tb_max.Text)
+            min_val, min_err = _parse_expr(tb_min.Text)
+            max_val, max_err = _parse_expr(tb_max.Text)
             if min_err:
                 errors.append("Min di %s: %s" % (vname, min_err))
             if max_err:
@@ -618,6 +623,13 @@ def show_variables_dialog(found_vars, inferred_defaults=None):
                 "desc":    tb_desc.Text.strip(),
             })
 
+        interne = {}
+        for dname, tb_f in interne_ui.items():
+            val, err = _parse_expr(tb_f.Text)
+            if err:
+                errors.append("Dim. interna %s: %s" % (dname, err))
+            interne[dname] = val
+
         if errors:
             ef.MessageBox.Show(
                 "\n".join(errors),
@@ -625,23 +637,56 @@ def show_variables_dialog(found_vars, inferred_defaults=None):
             return   # resta aperto, l'utente corregge
 
         result["data"] = data
+        result["interne"] = interne
         result["ok"] = True
         dlg.Close()
-    btn_ok.Click += on_ok
 
-    btn_skip = ef.Button(Text="Salta (nessuna sezione variabili)")
     def on_skip(s, e):
         result["ok"] = False
         dlg.Close()
+
+    btn_ok = ef.Button(Text="Conferma e esporta")
+    btn_ok.Click += on_ok
+    btn_skip = ef.Button(Text="Salta (nessuna sezione variabili)")
     btn_skip.Click += on_skip
 
-    layout.AddRow(None, btn_ok, btn_skip)
+    btns = ef.TableLayout()
+    btns.Spacing = ed.Size(6, 0)
+    btns.Rows.Add(ef.TableRow(btn_ok, btn_skip, None))
 
-    dlg.Content = layout
+    # ---- Composizione finale ----
+    title = ef.Label()
+    title.Text = "Variabili parametriche rilevate nelle formule"
+    title.Font = ed.Font(ed.SystemFont.Bold, 11)
+
+    note = ef.Label()
+    note.Text = ("Conferma o modifica i valori di default e il range\n"
+                 "ammissibile. Saranno scritti in testa al TXT esportato\n"
+                 "e usati dall'LLM per validare l'input dello script.\n"
+                 "Min e Max accettano anche formule (es. P-3, L/2+S).\n"
+                 "Lettere ammesse: %s (forzate maiuscole)." %
+                 " ".join(PACKAGING_VARS_ORDER))
+
+    sub_int = ef.Label()
+    sub_int.Text = "Dimensioni interne utili (formule parametriche)"
+    sub_int.Font = ed.Font(ed.SystemFont.Bold, 10)
+
+    main = ef.DynamicLayout()
+    main.Spacing = ed.Size(4, 6)
+    main.AddRow(title)
+    main.AddRow(note)
+    main.AddRow(grid)
+    main.AddRow(_mk_lbl("", False, 10))   # spaziatore
+    main.AddRow(sub_int)
+    main.AddRow(grid_int)
+    main.AddRow(_mk_lbl("", False, 10))   # spaziatore
+    main.AddRow(btns)
+
+    dlg.Content = main
     dlg.ShowModal(Rhino.UI.RhinoEtoApp.MainWindow)
 
     if result["ok"]:
-        return result["data"]
+        return {"vars": result["data"], "interne": result["interne"]}
     return None
 
 
@@ -1881,6 +1926,34 @@ def _variables_summary_lines(var_data):
     return out
 
 
+def _interne_summary_lines(interne):
+    """Righe commentate '# ...' che dichiarano le DIMENSIONI INTERNE UTILI
+    della scatola (L, P, A) come formule parametriche. Vanno in testa al
+    TXT. Se interne e' None o tutte le formule sono vuote, niente righe."""
+    if not interne:
+        return []
+    # Almeno una formula non vuota?
+    if not any(v is not None for v in interne.values()):
+        return []
+    _desc = {"L": "Lunghezza interna utile",
+             "P": "Profondita' interna utile",
+             "A": "Altezza interna utile"}
+    out = []
+    out.append("# DIMENSIONI INTERNE UTILI (formule per l'ingombro netto "
+               "interno della scatola)")
+    out.append("#   Dim  Formula               Descrizione")
+    for dname in ("L", "P", "A"):
+        val = interne.get(dname)
+        if val is None:
+            continue
+        if isinstance(val, float) or isinstance(val, int):
+            fstr = "%.2f" % val
+        else:
+            fstr = str(val)
+        out.append("#   %-3s  %-20s  %s" % (dname, fstr, _desc[dname]))
+    return out
+
+
 def _llm_prompt_header():
     """Testo del prompt da anteporre al TXT quando l'utente lo richiede.
     Rende il file autoportante: chi lo riceve (un LLM) ha davanti sia le
@@ -1992,6 +2065,10 @@ Uno script che:
   ATTENZIONE: Min e Max possono essere numeri OPPURE espressioni
   parametriche (es. 'P-3', 'L/2'). Se sono espressioni, valutale con
   i valori correnti delle variabili gia' inserite prima di confrontare;
+- se presente la sezione '# DIMENSIONI INTERNE UTILI', calcoli le
+  dimensioni interne nette della scatola (L, P, A interni) valutando le
+  loro formule con i valori correnti, e le stampi a fine esecuzione come
+  riepilogo informativo (es. 'Interno utile: L=.. P=.. A=..');
 - costruisca tutte le geometrie dalle loro formule;
 - come ULTIME operazioni: ricostruisca l'asse parametrico, applichi le
   specchiature (scatola intera, meta' unite sull'asse) e infine CANCELLI
@@ -2019,7 +2096,8 @@ inesattezza prima di restituire la versione finale.
 === GEOMETRIE E RAPPORTI PARAMETRICI DEL PACKAGING ===
 """)
 
-def export_objects(curve_objs, point_objs, include_prompt=False, var_data=None):
+def export_objects(curve_objs, point_objs, include_prompt=False,
+                   var_data=None, interne=None):
     """Genera il contenuto TXT e lo salva."""
     lines = []
     rows = []
@@ -2155,6 +2233,8 @@ def export_objects(curve_objs, point_objs, include_prompt=False, var_data=None):
     lines.append("# Angoli archi: convenzione con segno (CW = negativo)")
     for _vl in _variables_summary_lines(var_data):
         lines.append(_vl)
+    for _il in _interne_summary_lines(interne):
+        lines.append(_il)
     lines.append("# Blocco: lista dei passi di specchiatura (CSV) cui la curva "
                  "partecipa; per le linee-asse e' il passo che definiscono.")
     lines.append("# Colonne: " + "  ".join(COLUMNS))
@@ -2246,6 +2326,7 @@ def main():
     if do_export:
         # v5.6: estrazione variabili parametriche dalle formule dei punti
         var_data = None
+        interne = None
         points_map, _sk, _lok = _collect_param_points()
         if points_map:
             found_vars = _extract_variables_from_formulas(points_map)
@@ -2258,15 +2339,21 @@ def main():
                     print("Default dedotti dal disegno: %s" % (
                         ", ".join("%s=%.4g" % (k, v)
                                   for k, v in sorted(solved.items()))))
-                var_data = show_variables_dialog(found_vars,
+                dlg_res = show_variables_dialog(found_vars,
                                                 inferred_defaults=solved)
-                if var_data is not None:
+                if dlg_res is not None:
+                    var_data = dlg_res.get("vars", [])
+                    interne = dlg_res.get("interne", {})
                     print("Variabili confermate: %d" % len(var_data))
+                    nint = len([1 for v in interne.values() if v is not None])
+                    if nint:
+                        print("Dimensioni interne definite: %d" % nint)
                 else:
                     print("Sezione variabili saltata dall'utente.")
         print("-" * 60)
         export_objects(curve_objs, point_objs,
-                       include_prompt=include_prompt, var_data=var_data)
+                       include_prompt=include_prompt,
+                       var_data=var_data, interne=interne)
     else:
         print("-" * 60)
         print("Propagazione completata. Nessun export su file.")
