@@ -29,6 +29,11 @@ NOVITA V.5.6 rispetto a V.5.5:
     '# VARIABILI PARAMETRICHE' (valutando i Min/Max-formula con i valori
     correnti), a validare l'input con avviso e ri-richiesta, e a calcolare
     e riportare le dimensioni interne utili.
+  - [Prompt LLM - ricostruzione] Nuove sezioni che impongono la PRECEDENZA
+    delle fonti (UserText > colonne numeriche), la ricostruzione degli
+    archi con i TRE PUNTI (start, Punto_medio, end) univoca anche a 180
+    gradi, il fallback sul segno del Verso/angoli se manca lo UserText, e
+    la gerarchia dei separatori interni alle celle (TAB > ';' > ',' / '|').
 
 UNIFICA:
   - Aggiorna_UserText_Parametrico (propagazione punti parametrici -> curve)
@@ -1983,7 +1988,8 @@ COME LEGGERE I DATI CHE SEGUONO
   che definiscono il RAPPORTO PARAMETRICO di ogni geometria:
     Linea   -> P1_param, P2_param  (estremi come formule)
     Cerchio -> Centro_param, Raggio
-    Arco    -> P1_param, P2_param, Punto_medio (tre punti), Raggio
+    Arco    -> P1_param, P2_param, Punto_medio (tre punti!), Raggio,
+               Centro_geom, Verso  (usa i TRE PUNTI: univoco anche a 180)
     Raccordo conico -> P1_param, P2_param, CtrlProp_u, CtrlProp_v,
                        CtrlPeso_w
     Curva libera    -> CtrlPoints (x,y,w | ...), Nodi, Grado
@@ -1996,6 +2002,57 @@ COME LEGGERE I DATI CHE SEGUONO
   linea. Due tangenze adiacenti delimitano un arco di raccordo (di norma
   un quarto di cerchio): ricostruiscilo come arco esatto, non come
   spezzata.
+
+PRECEDENZA DELLE FONTI (regola d'oro)
+- Per ricostruire una curva, usa SEMPRE nell'ordine: (1) le formule
+  parametriche dello UserText; (2) se assenti, i campi geometrici dello
+  UserText (Punto_medio, Centro_geom, CtrlPoints, Nodi); (3) solo come
+  ultima risorsa le colonne numeriche della riga (R, CX, CY, AngS, AngE,
+  CP, Sampled). Le colonne sono di servizio/verifica: lo UserText e' la
+  sorgente di verita'.
+- Se la colonna 'Geom' e lo UserText 'Tipo_Originale' divergono (es.
+  Geom=Nurbs ma Tipo_Originale=Arc, oppure e' presente una firma conica
+  CtrlProp_u/v + CtrlPeso_w), FIDATI dello UserText: ricostruisci come
+  arco/conica, non come NURBS grezza.
+
+COME RICOSTRUIRE GLI ARCHI (importante: caso 180 gradi)
+- Modo CANONICO e UNIVOCO: ricostruisci l'arco con i TRE PUNTI
+  start -> Punto_medio -> end, cioe' rg.Arc(p_start, p_mid, p_end).
+  Il Punto_medio (nello UserText) e' il punto a meta' arco e fissa da
+  solo il lato e il verso: e' immune ad ambiguita' di piano e segno.
+- NON ricostruire un arco solo da centro + raggio + estremi: dati due
+  estremi e un raggio esistono fino a quattro archi possibili (centro su
+  un lato o l'altro della corda, arco minore o maggiore). E' AMBIGUO.
+- Caso critico - arco di 180 gradi (semicerchio): i due estremi sono
+  diametralmente opposti, quindi centro, raggio e angoli NON bastano a
+  scegliere se il semicerchio sta sopra o sotto la corda. La colonna
+  AngS/AngE da sola e' INSUFFICIENTE qui. Usa OBBLIGATORIAMENTE il
+  Punto_medio (o, se manca, il segno del Verso CW/CCW dello UserText)
+  per scegliere il lato corretto.
+- Dopo la ricostruzione, VERIFICA: l'arco deve passare per il
+  Punto_medio entro 0.01 mm; gli estremi devono coincidere con i punti
+  parametrici. Se non combaciano, hai scelto il lato sbagliato.
+- Se per un arco MANCA lo UserText (estremi non associati a punti
+  parametrici), ricostruiscilo dalle sole colonne: centro (CX,CY),
+  raggio R ed estremi, e percorri l'arco da AngS ad AngE NEL VERSO
+  indicato dal SEGNO degli angoli (valori negativi = orario/CW). Verso
+  crescente AngS->AngE = antiorario. A 180 esatti senza UserText questa
+  e' l'unica informazione disponibile: rispettala alla lettera.
+
+COME RICOSTRUIRE LE CURVE NURBS / RACCORDI
+- Raccordo conico (Bezier quadratica, grado 2, 3 CP): lo UserText ha la
+  firma di forma CtrlProp_u, CtrlProp_v (posizione adimensionale del CP
+  intermedio nel rettangolo degli estremi) e CtrlPeso_w (peso). Ricostrui-
+  sci il CP intermedio dai due estremi parametrici applicando u, v, poi
+  crea la NURBS di grado 2 con il peso w. Cosi' il raccordo si riscala
+  con i parametri. Se w=1 e' una parabola; se w!=1 e' una conica.
+- Curva libera (altri gradi): lo UserText ha CtrlPoints (lista 'x,y,w'
+  separata da '|') e Nodi (knot vector). Ricostruisci la NURBS con quei
+  CP, pesi e nodi: forma esatta ma non riscalabile.
+- I separatori interni alle celle sono gerarchici: TAB separa le colonne;
+  dentro la colonna CP/Sampled ';' separa i punti e ',' le coordinate;
+  dentro lo UserText ';' separa le coppie chiave=valore e '|' separa i
+  CtrlPoints. Non confonderli: il parsing di riga e' SEMPRE e SOLO su TAB.
 
 COME RICONOSCERE GLI ASSI DI SPECCHIO (linee cyan)
 - Gli assi di specchiatura NON sono geometria da fustellare. Una linea
