@@ -2,20 +2,48 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PKG ESPORTA PDF VETTORIALE  v1.5  -  Rhino 7 / 8  (IronPython 2.7)
+#  PKG ESPORTA PDF VETTORIALE  v2.0  -  Rhino 7 / 8  (IronPython 2.7)
 #
-#  Novita' v1.5:
-#    - REGOLE DI MAPPATURA: ogni colore input (Rhino) viene rimappato
-#      su un layer PDF di output con nome, colore, spessore e
-#      sovrastampa definiti. Regole di default hardcoded.
-#    - DIALOGO RINNOVATO: tabella Input -> Output con layer di
-#      destinazione, tipo colore (Spot/CMYK), valori colore,
-#      spessore linea per-layer, sovrastampa per-layer.
-#    - COMPATIBILITA' ILLUSTRATOR: OCG con /Intent /Design e
-#      /Usage/CreatorInfo cosi' Illustrator riconosce i livelli
-#      nativamente (non solo Acrobat Reader).
-#    - PDF CMYK + Separation color space + ExtGState sovrastampa.
+#  Novita' v2.0 (spessore per tipo di linea):
+#    - RAGGRUPPAMENTO PER (COLORE, TRATTEGGIO): le righe del dialogo
+#      ora distinguono linee continue e tratteggiate dello stesso
+#      colore, perche' in Rhino hanno spesso plot weight diversi
+#      (es. taglio continuo vs cordonatura tratteggiata). Ogni riga
+#      legge il proprio spessore Rhino. Le tratteggiate sono marcate
+#      con " (tr)" nella colonna "Layer in".
+#    - SPESSORE PER-OGGETTO NEL PDF: il "w" viene scritto in base al
+#      gruppo (colore, tratteggio) del singolo oggetto, non piu' un
+#      unico valore per layer. ERA LA CAUSA per cui lo spessore letto
+#      non si vedeva nel PDF: continue e tratteggiate dello stesso
+#      colore collassavano su un unico spessore di layer.
+#    - Continue e tratteggiate possono restare sullo stesso layer/spot
+#      (stessa lastra) mantenendo spessori diversi.
 #
+#  Novita' v1.9:
+#    - Lo spessore iniziale mostrato nella finestra di esportazione viene
+#      letto da Rhino: ObjectAttributes.PlotWeight se lo spessore e' da
+#      oggetto, altrimenti Layer.PlotWeight / per-viewport se disponibile.
+#      Le regole hardcoded restano solo come fallback.
+#
+#  Novita' v1.8 (correzione dimensione stampa testi/quote):
+#    - STILE EFFETTIVO CON OVERRIDE: get_dimstyle ora usa la proprieta'
+#      AnnotationBase.DimensionStyle, che include gli override del
+#      singolo oggetto (altezza testo, scala modificati nelle
+#      proprieta'). Prima si usava solo lo stile padre via FindId,
+#      ignorando gli override: ERA LA CAUSA principale della
+#      differenza di dimensione rispetto a Rhino.
+#    - SCALA REALE: get_annotation_scale ora usa
+#      GetDimensionScale(doc, dimstyle, vport) invece della sola
+#      proprieta' statica DimensionScale (spesso 1).
+#    - DIAGNOSTICA: con DEBUG_ANNOT=True ogni testo/quota stampa
+#      altezza padre / effettiva / geo / scala / altezza finale,
+#      per verificare al volo cosa viene applicato.
+#
+#  v1.7: scala model space su testi/quote/frecce (parziale: usava
+#    DimensionScale statico); dialogo HiDPI (AutoScaleMode.Font).
+#  v1.6: persistenza globale (%APPDATA%), preselect, nome PDF dal
+#    .3dm, "apri dopo l'export", fix obj.Id, warning collisione layer.
+#  v1.5: regole di mappatura, dialogo rinnovato, OCG Illustrator.
 #  v1.4: dialogo per-layer, CMYK/Spot, overprint.
 #  v1.3: dialogo base. v1.2: testo riempito/centrato, frecce,
 #  gap linea quota.
@@ -28,6 +56,8 @@ import System
 import System.Windows.Forms as WinForms
 import System.Drawing as Drawing
 import math
+import os
+import json
 
 from Rhino.Geometry import (BoundingBox, LineCurve, ArcCurve,
                             PolylineCurve, NurbsCurve, PolyCurve,
@@ -45,20 +75,13 @@ POLYLINE_ANGLE_TOL = 0.02
 POLYLINE_DIST_TOL = 0.01
 ARROW_WIDTH_RATIO = 0.35
 
+# Diagnostica annotazioni: stampa altezze e scala per ogni testo/quota.
+# Mettere a False per silenziare una volta verificato.
+DEBUG_ANNOT = True
+
 
 # =============================================================================
-# REGOLE DI MAPPATURA (default)
-#
-# Ogni regola mappa un colore input (RGB Rhino) a un layer PDF di output.
-# match_color: RGB da cercare (0-255)
-# match_tolerance: distanza euclidea massima per il match
-# output_layer: nome del livello PDF di destinazione
-# color_type: 'spot' o 'cmyk'
-# spot_name: nome colore spot (usato se color_type == 'spot')
-# rgb: RGB di anteprima spot (0-255)
-# cmyk: valori CMYK (0.0-1.0) (usato se color_type == 'cmyk')
-# line_width: spessore linea in mm
-# overprint: sovrastampa (True/False)
+# REGOLE DI MAPPATURA (default hardcoded)
 # =============================================================================
 DEFAULT_RULES = [
     {
@@ -94,6 +117,79 @@ DEFAULT_RULES = [
 
 
 # =============================================================================
+# PERSISTENZA PREFERENZE (%APPDATA%)
+# =============================================================================
+_user_rules = []   # popolato in main() da load_user_prefs()
+
+
+def _prefs_dir():
+    appdata = System.Environment.GetFolderPath(
+        System.Environment.SpecialFolder.ApplicationData)
+    return os.path.join(appdata, "PKG_ExportPDF")
+
+
+def _prefs_path():
+    return os.path.join(_prefs_dir(), "prefs.json")
+
+
+def load_user_prefs():
+    """Carica regole e preferenze da %APPDATA%/PKG_ExportPDF/prefs.json.
+    Restituisce (rules_list, margin, open_after)."""
+    try:
+        path = _prefs_path()
+        if not os.path.isfile(path):
+            return ([], DEFAULT_MARGIN_MM, True)
+        with open(path, "r") as f:
+            data = json.load(f)
+        rules = data.get("rules", [])
+        for r in rules:
+            r['match_color'] = tuple(r['match_color'])
+            if 'rgb' in r:
+                r['rgb'] = tuple(r['rgb'])
+            if 'cmyk' in r:
+                r['cmyk'] = tuple(r['cmyk'])
+        margin = data.get("margin", DEFAULT_MARGIN_MM)
+        open_after = data.get("open_after", True)
+        return (rules, margin, open_after)
+    except Exception as e:
+        print("  [INFO] Nessuna preferenza salvata (%s)." % e)
+        return ([], DEFAULT_MARGIN_MM, True)
+
+
+def save_user_prefs(rows_settings, margin, open_after):
+    """Salva le regole correnti e le preferenze in %APPDATA%."""
+    try:
+        d = _prefs_dir()
+        if not os.path.isdir(d):
+            os.makedirs(d)
+        data = {
+            "rules": [],
+            "margin": margin,
+            "open_after": open_after,
+        }
+        for s in rows_settings:
+            entry = {
+                'match_color': list(s['match_color']),
+                'match_tolerance': 5,
+                'match_dashed': bool(s.get('match_dashed', False)),
+                'output_layer': s['output_layer'],
+                'color_type': s['type'],
+                'spot_name': s.get('spot_name', s['output_layer']),
+                'rgb': list(s.get('rgb', s['match_color'])),
+                'cmyk': list(s.get('cmyk', (0, 0, 0, 1))),
+                'line_width': s['line_width'],
+                'overprint': s['overprint'],
+            }
+            data["rules"].append(entry)
+        path = _prefs_path()
+        with open(path, "w") as f:
+            json.dump(data, f, indent=2)
+        print("Preferenze salvate in: %s" % path)
+    except Exception as e:
+        print("  [WARN] Salvataggio preferenze fallito: %s" % e)
+
+
+# =============================================================================
 # UTILITA'
 # =============================================================================
 def get_unit_scale():
@@ -104,9 +200,7 @@ def fmt(v):
     return "%.4f" % v
 
 def strip_rtf(text):
-    """Estrae testo plain da una stringa RTF.
-    Alcune annotazioni Rhino 7/8 memorizzano testo in formato RTF;
-    se passato a CreateTextOutlines il markup viene renderizzato."""
+    """Estrae testo plain da una stringa RTF."""
     if not text or not text.startswith("{\\rtf"):
         return text
     try:
@@ -119,6 +213,20 @@ def strip_rtf(text):
         return text
 
 def get_dimstyle(geo):
+    """Stile di quota EFFETTIVO dell'annotazione, con gli override del
+    singolo oggetto inclusi (altezza testo, scala, ecc. modificati nelle
+    proprieta'). La v1.5/1.6 usava solo lo stile padre via FindId, quindi
+    ignorava gli override: e' la causa della dimensione diversa da Rhino."""
+    # 1) Proprieta' DimensionStyle: include gli override; se non ci sono
+    #    override restituisce lo stile padre.
+    try:
+        ds = geo.DimensionStyle
+        _ = ds.TextHeight   # verifica che sia davvero uno stile (non un metodo)
+        if ds is not None:
+            return ds
+    except Exception:
+        pass
+    # 2) Fallback: stile padre per Id
     try:
         ds = sc.doc.DimStyles.FindId(geo.DimensionStyleId)
         if ds is not None:
@@ -127,10 +235,46 @@ def get_dimstyle(geo):
         pass
     return sc.doc.DimStyles.Current
 
+def _active_viewport():
+    try:
+        return sc.doc.Views.ActiveView.ActiveViewport
+    except Exception:
+        return None
+
+def get_annotation_scale(geo, dimstyle):
+    """Fattore con cui Rhino MOSTRA/STAMPA l'annotazione.
+    Usa AnnotationBase.GetDimensionScale(doc, dimstyle, vport), che
+    restituisce la scala di visualizzazione reale (scala spazio modello /
+    dettaglio). In fallback usa la proprieta' statica DimensionScale."""
+    vport = _active_viewport()
+    if vport is not None:
+        try:
+            s = geo.GetDimensionScale(sc.doc, dimstyle, vport)
+            if s and s > 0:
+                return float(s)
+        except Exception:
+            pass
+    try:
+        s = dimstyle.DimensionScale
+        if s and s > 0:
+            return float(s)
+    except Exception:
+        pass
+    return 1.0
+
+def _scale_curves(crvs, anchor, factor):
+    """Scala in-place una lista di curve attorno a un punto di ancoraggio."""
+    if abs(factor - 1.0) < 1e-9:
+        return crvs
+    xf = Transform.Scale(anchor, factor)
+    for c in crvs:
+        if c is not None:
+            c.Transform(xf)
+    return crvs
+
 def rgb_to_cmyk(r, g, b):
     """RGB 0-255 -> CMYK 0.0-1.0.
-    Nero puro -> nero di registro (C100 M100 Y100 K100)
-    per comparire su tutte le lastre colore."""
+    Nero puro -> nero di registro (C100 M100 Y100 K100)."""
     r1, g1, b1 = r / 255.0, g / 255.0, b / 255.0
     k = 1.0 - max(r1, g1, b1)
     if k >= 0.9999:
@@ -148,6 +292,99 @@ def get_display_color(obj):
     return sc.doc.Layers[obj.Attributes.LayerIndex].Color
 
 
+def _valid_plot_weight_mm(value):
+    """Normalizza uno spessore di stampa Rhino.
+    RhinoCommon usa i millimetri: >0 = spessore valido, 0 = default Rhino,
+    <0 = non stampare. Per 0/<0 restituiamo None e lasciamo il fallback
+    alle regole del dialogo, senza inventare un valore non scritto in Rhino."""
+    try:
+        w = float(value)
+    except Exception:
+        return None
+    if w > 0.0:
+        return w
+    return None
+
+
+def _layer_per_viewport_plot_weight(layer):
+    """Lettura difensiva dello spessore per-viewport, se presente.
+    In Rhino 7/8 la firma puo' cambiare leggermente; se non disponibile
+    si passa serenamente a layer.PlotWeight."""
+    try:
+        vport = _active_viewport()
+        if vport is None:
+            return None
+        ids = []
+        for attr_name in ["Id", "ViewportId"]:
+            try:
+                vid = getattr(vport, attr_name)
+                if vid and vid not in ids:
+                    ids.append(vid)
+            except Exception:
+                pass
+        for vid in ids:
+            try:
+                w = _valid_plot_weight_mm(layer.GetPerViewportPlotWeight(vid))
+                if w is not None:
+                    return w
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return None
+
+
+def get_effective_plot_weight_mm(obj):
+    """Restituisce lo spessore di stampa effettivo Rhino in mm.
+    Rispetta PlotWeightSource: da oggetto, da layer, o da parent/layer.
+    Se Rhino indica 0 = default oppure -1 = non stampare, restituisce None."""
+    try:
+        attr = obj.Attributes
+        src = attr.PlotWeightSource
+    except Exception:
+        attr = None
+        src = None
+
+    try:
+        src_name = str(src)
+    except Exception:
+        src_name = ""
+
+    # Spessore assegnato direttamente all'oggetto.
+    if src_name.endswith("PlotWeightFromObject"):
+        w_obj = _valid_plot_weight_mm(attr.PlotWeight)
+        if w_obj is not None:
+            return w_obj
+
+    # Default: spessore dal layer. Anche PlotWeightFromParent, senza parent
+    # gestibile qui, viene trattato come layer.
+    try:
+        layer = sc.doc.Layers[attr.LayerIndex]
+        w_vp = _layer_per_viewport_plot_weight(layer)
+        if w_vp is not None:
+            return w_vp
+        return _valid_plot_weight_mm(layer.PlotWeight)
+    except Exception:
+        pass
+
+    return None
+
+
+def get_group_plot_weight_mm(objects):
+    """Spessore iniziale per una riga del dialogo.
+    Se nel gruppo ci sono valori diversi, usa il primo valore valido ma
+    restituisce anche la lista dei valori trovati per diagnostica."""
+    vals = []
+    for obj in objects:
+        w = get_effective_plot_weight_mm(obj)
+        if w is not None:
+            vals.append(round(w, 4))
+    if not vals:
+        return (None, [])
+    uniq = sorted(set(vals))
+    return (vals[0], uniq)
+
+
 def color_distance(c1, c2):
     """Distanza euclidea RGB."""
     return math.sqrt(
@@ -156,29 +393,49 @@ def color_distance(c1, c2):
         (c1[2] - c2[2]) ** 2)
 
 
-def find_matching_rule(r, g, b):
-    """Trova la regola con match migliore, None se nessuna entro tolleranza."""
-    best = None
-    best_dist = float('inf')
-    for rule in DEFAULT_RULES:
-        dist = color_distance((r, g, b), rule['match_color'])
-        tol = rule.get('match_tolerance', 10)
-        if dist <= tol and dist < best_dist:
-            best = rule
-            best_dist = dist
-    return best
+def find_matching_rule(r, g, b, is_dashed=None):
+    """Trova la regola con match migliore.
+    Cerca prima nelle regole utente salvate, poi nei default.
+    Se la regola specifica 'match_dashed', deve combaciare con lo stato
+    tratteggio dell'oggetto; le regole senza 'match_dashed' valgono per
+    entrambi. A parita', si preferisce la regola piu' specifica (dash)."""
+    for rules_list in [_user_rules, DEFAULT_RULES]:
+        best = None
+        best_dist = float('inf')
+        best_specific = False
+        for rule in rules_list:
+            dist = color_distance((r, g, b), rule['match_color'])
+            tol = rule.get('match_tolerance', 10)
+            if dist > tol:
+                continue
+            rdash = rule.get('match_dashed', None)
+            if rdash is not None and is_dashed is not None and rdash != is_dashed:
+                continue  # regola per l'altro tipo di linea
+            specific = (rdash is not None and is_dashed is not None
+                        and rdash == is_dashed)
+            if (specific and not best_specific) or \
+               (specific == best_specific and dist < best_dist):
+                best = rule
+                best_dist = dist
+                best_specific = specific
+        if best is not None:
+            return best
+    return None
 
 
 # =============================================================================
-# DIALOGO IMPOSTAZIONI v1.5
+# DIALOGO IMPOSTAZIONI v1.6
 # =============================================================================
 class LayerRow(object):
     """Controlli per una riga di mappatura nel dialogo."""
-    def __init__(self, parent, y, input_rgb, input_label, rule):
-        self.input_rgb = input_rgb
+    def __init__(self, parent, y, group_key, input_label, rule):
+        # group_key = (rgb_tuple, is_dashed)
+        self.group_key = group_key
+        self.input_rgb = group_key[0]
+        self.is_dashed = group_key[1]
         self.rule = rule
 
-        ir, ig, ib = input_rgb
+        ir, ig, ib = self.input_rgb
         self.input_color = Drawing.Color.FromArgb(255, ir, ig, ib)
 
         # -- Colore input (swatch) --
@@ -198,7 +455,7 @@ class LayerRow(object):
 
         # -- Freccia --
         arr = WinForms.Label()
-        arr.Text = unichr(0x2192)  # freccia destra
+        arr.Text = unichr(0x2192)
         arr.Location = Drawing.Point(108, y + 4)
         arr.Size = Drawing.Size(16, 18)
         arr.Font = Drawing.Font(arr.Font.FontFamily, 10.0)
@@ -224,7 +481,7 @@ class LayerRow(object):
         parent.Controls.Add(self.combo)
 
         # -- Controlli Spot: R/G/B --
-        spot_rgb = rule.get('rgb', input_rgb)
+        spot_rgb = rule.get('rgb', self.input_rgb)
         x = 274
         self.lbl_r = self._lbl(parent, "R", x, y + 5)
         self.nud_r = self._nud(parent, spot_rgb[0], 0, 255, x + 13, y + 2, 42)
@@ -257,7 +514,7 @@ class LayerRow(object):
         self.lbl_lw = self._lbl(parent, "lw", x_lw, y + 5)
         self.nud_lw = WinForms.NumericUpDown()
         self.nud_lw.Location = Drawing.Point(x_lw + 18, y + 2)
-        self.nud_lw.Size = Drawing.Size(50, 22)
+        self.nud_lw.Size = Drawing.Size(50, 24)
         self.nud_lw.Minimum = System.Decimal(0)
         self.nud_lw.Maximum = System.Decimal(5)
         self.nud_lw.DecimalPlaces = 2
@@ -292,7 +549,7 @@ class LayerRow(object):
     def _nud(self, parent, val, lo, hi, x, y, w=44):
         nud = WinForms.NumericUpDown()
         nud.Location = Drawing.Point(x, y)
-        nud.Size = Drawing.Size(w, 22)
+        nud.Size = Drawing.Size(w, 24)
         nud.Minimum = System.Decimal(lo)
         nud.Maximum = System.Decimal(hi)
         nud.DecimalPlaces = 0
@@ -322,11 +579,14 @@ class LayerRow(object):
             return {
                 'type': 'spot',
                 'output_layer': out_name,
-                'spot_name': out_name,  # nome layer = nome spot
+                'spot_name': out_name,
                 'rgb': (r, g, b),
                 'cmyk': rgb_to_cmyk(r, g, b),
                 'overprint': ovp,
                 'line_width': lw,
+                'match_color': self.input_rgb,
+                'match_dashed': self.is_dashed,
+                'group_key': self.group_key,
             }
         else:  # CMYK
             c = float(self.nud_c.Value) / 100.0
@@ -339,22 +599,35 @@ class LayerRow(object):
                 'cmyk': (c, m, y, k),
                 'overprint': ovp,
                 'line_width': lw,
+                'match_color': self.input_rgb,
+                'match_dashed': self.is_dashed,
+                'group_key': self.group_key,
             }
 
 
 class ExportDialog(WinForms.Form):
-    """Dialogo v1.5: mappatura colore input -> layer output."""
-    def __init__(self, rows_data):
-        """rows_data: [(input_rgb, input_label, matched_rule), ...]"""
+    """Dialogo v1.8: mappatura colore input -> layer output."""
+    def __init__(self, rows_data, saved_margin, saved_open_after):
+        """rows_data: [(group_key, input_label, matched_rule), ...]
+        dove group_key = (rgb_tuple, is_dashed).
+        saved_margin: margine caricato dalle preferenze.
+        saved_open_after: stato checkbox caricato dalle preferenze."""
         self.result = None
         self.layer_rows = []
         self.rows_data = rows_data
+        self._rows_settings = []   # popolato in on_ok per persistenza
 
-        self.Text = "PKG Esporta PDF Vettoriale  v1.5"
+        self.Text = "PKG Esporta PDF Vettoriale  v2.0"
         self.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
         self.MaximizeBox = False
         self.MinimizeBox = False
         self.StartPosition = WinForms.FormStartPosition.CenterScreen
+
+        # Auto-scaling DPI: a risoluzioni/zoom diversi (es. 125/150% in
+        # fabbrica) WinForms riscala in proporzione font e controlli, cosi'
+        # le caselle non tagliano piu' le cifre.
+        self.AutoScaleDimensions = Drawing.SizeF(6.0, 13.0)
+        self.AutoScaleMode = WinForms.AutoScaleMode.Font
 
         n = len(rows_data)
         row_h = 28
@@ -365,7 +638,8 @@ class ExportDialog(WinForms.Form):
 
         # --- Intestazione ---
         lbl_title = WinForms.Label()
-        lbl_title.Text = "Mappatura colori input  " + unichr(0x2192) + "  livelli PDF output"
+        lbl_title.Text = ("Mappatura colori input  " + unichr(0x2192)
+                          + "  livelli PDF output    [(tr) = linea tratteggiata]")
         lbl_title.Font = Drawing.Font(lbl_title.Font, Drawing.FontStyle.Bold)
         lbl_title.Location = Drawing.Point(10, 8)
         lbl_title.AutoSize = True
@@ -396,8 +670,8 @@ class ExportDialog(WinForms.Form):
         panel.BorderStyle = WinForms.BorderStyle.FixedSingle
         self.Controls.Add(panel)
 
-        for i, (input_rgb, input_label, rule) in enumerate(rows_data):
-            lr = LayerRow(panel, i * row_h, input_rgb, input_label, rule)
+        for i, (group_key, input_label, rule) in enumerate(rows_data):
+            lr = LayerRow(panel, i * row_h, group_key, input_label, rule)
             self.layer_rows.append(lr)
 
         # --- Footer ---
@@ -422,7 +696,9 @@ class ExportDialog(WinForms.Form):
         self.margin_box.Minimum = System.Decimal(0)
         self.margin_box.Maximum = System.Decimal(200)
         self.margin_box.DecimalPlaces = 1
-        self.margin_box.Value = System.Decimal(DEFAULT_MARGIN_MM)
+        self.margin_box.Value = System.Decimal(
+            int(round(max(0.0, min(200.0, saved_margin)) * 10))
+        ) / System.Decimal(10)
         self.Controls.Add(self.margin_box)
 
         lbl_mm = WinForms.Label()
@@ -430,6 +706,14 @@ class ExportDialog(WinForms.Form):
         lbl_mm.Location = Drawing.Point(174, y_foot + 12)
         lbl_mm.AutoSize = True
         self.Controls.Add(lbl_mm)
+
+        # Checkbox: Apri PDF dopo l'export
+        self.chk_open = WinForms.CheckBox()
+        self.chk_open.Text = "Apri PDF dopo l'export"
+        self.chk_open.Location = Drawing.Point(250, y_foot + 11)
+        self.chk_open.Size = Drawing.Size(170, 20)
+        self.chk_open.Checked = saved_open_after
+        self.Controls.Add(self.chk_open)
 
         # Pulsanti
         btn_ok = WinForms.Button()
@@ -451,16 +735,54 @@ class ExportDialog(WinForms.Form):
     def on_ok(self, sender, args):
         layers = {}
         color_map = {}
+        width_map = {}
+        all_settings = []
+        collisions = []
+
         for i, lr in enumerate(self.layer_rows):
             s = lr.get_settings()
             out_name = s['output_layer']
+            gk = s['group_key']
+            all_settings.append(s)
+
+            # Collisione: stesso layer output con colore/tipo/overprint
+            # diversi. Lo spessore NON e' piu' un conflitto: e' applicato
+            # per-oggetto, quindi continue e tratteggiate possono condividere
+            # lo stesso layer/spot con spessori diversi.
+            if out_name in layers:
+                prev = layers[out_name]
+                if (prev.get('type') != s.get('type')
+                    or prev.get('overprint') != s.get('overprint')
+                    or prev.get('rgb') != s.get('rgb')
+                    or prev.get('cmyk') != s.get('cmyk')):
+                    if out_name not in collisions:
+                        collisions.append(out_name)
+
             layers[out_name] = s
-            # Mappa il colore input -> layer output
-            color_map[lr.input_rgb] = out_name
+            color_map[gk] = out_name
+            width_map[gk] = s['line_width']
+
+        # Warning collisione
+        if collisions:
+            msg = ("Attenzione: i seguenti layer di output ricevono "
+                   "colori/tipi diversi con impostazioni in conflitto:\n\n"
+                   + ", ".join(collisions)
+                   + "\n\nVerranno usate le impostazioni dell'ultima "
+                   "riga (lo spessore resta per-oggetto). Continuare?")
+            result = WinForms.MessageBox.Show(
+                msg, "Collisione layer",
+                WinForms.MessageBoxButtons.YesNo,
+                WinForms.MessageBoxIcon.Warning)
+            if result != WinForms.DialogResult.Yes:
+                return
+
+        self._rows_settings = all_settings
         self.result = {
             'margin': float(self.margin_box.Value),
             'layers': layers,
             'color_map': color_map,
+            'width_map': width_map,
+            'open_after': self.chk_open.Checked,
         }
         self.DialogResult = WinForms.DialogResult.OK
         self.Close()
@@ -517,7 +839,26 @@ def curves_from_annotation(geo):
     fill = []
     dimstyle = get_dimstyle(geo)
 
-    # Salta annotazioni con markup RTF grezzo
+    if DEBUG_ANNOT:
+        try:
+            parent_ds = sc.doc.DimStyles.FindId(geo.DimensionStyleId)
+            parent_h = parent_ds.TextHeight if parent_ds else -1
+        except Exception:
+            parent_h = -1
+        try:
+            eff_h = dimstyle.TextHeight
+        except Exception:
+            eff_h = -1
+        try:
+            geo_h = geo.TextHeight
+        except Exception:
+            geo_h = -1
+        sc_factor = get_annotation_scale(geo, dimstyle)
+        print("  [DBG] %s | h_padre=%.3f h_eff=%.3f h_geo=%.3f scala=%.3f "
+              "-> altezza finale=%.3f" % (
+                  type(geo).__name__, parent_h, eff_h, geo_h, sc_factor,
+                  (geo_h if geo_h > 0 else eff_h) * sc_factor))
+
     try:
         pt = geo.PlainText
         if pt and pt.strip().startswith("{\\rtf"):
@@ -527,10 +868,17 @@ def curves_from_annotation(geo):
         pass
 
     if isinstance(geo, TextEntity):
+        dim_scale = get_annotation_scale(geo, dimstyle)
+        try:
+            anchor = geo.Plane.Origin
+        except Exception:
+            anchor = Point3d.Origin
         try:
             result = geo.CreateCurves(dimstyle, False)
             if result and len(result) > 0:
-                fill.extend(close_text_outlines(result))
+                crvs = list(result)
+                _scale_curves(crvs, anchor, dim_scale)
+                fill.extend(close_text_outlines(crvs))
                 return (stroke, fill)
         except Exception:
             pass
@@ -538,15 +886,17 @@ def curves_from_annotation(geo):
             result = geo.Explode()
             if result:
                 raw = [item for item in result if isinstance(item, Curve)]
+                _scale_curves(raw, anchor, dim_scale)
                 fill.extend(close_text_outlines(raw))
         except Exception:
             pass
         return (stroke, fill)
 
     if isinstance(geo, Dimension):
+        dim_scale = get_annotation_scale(geo, dimstyle)
         arrow1 = arrow2 = text_3d = None
         text_half_w = 0.0
-        text_height = dimstyle.TextHeight
+        text_height = dimstyle.TextHeight * dim_scale
 
         if isinstance(geo, LinearDimension):
             try:
@@ -574,7 +924,7 @@ def curves_from_annotation(geo):
                 except Exception:
                     pass
                 try:
-                    text_height = geo.TextHeight
+                    text_height = geo.TextHeight * dim_scale
                 except Exception:
                     pass
                 std_plane = Plane(Point3d.Origin,
@@ -621,7 +971,7 @@ def curves_from_annotation(geo):
             try:
                 tg = dimstyle.TextGap
                 if tg > 0:
-                    tgm = tg
+                    tgm = tg * dim_scale
             except Exception:
                 pass
             gh = text_half_w + tgm
@@ -646,7 +996,7 @@ def curves_from_annotation(geo):
         # Frecce
         if arrow1 is not None and arrow2 is not None:
             try:
-                al = dimstyle.ArrowLength
+                al = dimstyle.ArrowLength * dim_scale
                 if al <= 0:
                     al = text_height * 0.5
                 d1 = arrow1 - arrow2
@@ -660,6 +1010,11 @@ def curves_from_annotation(geo):
         return (stroke, fill)
 
     if isinstance(geo, Leader):
+        dim_scale = get_annotation_scale(geo, dimstyle)
+        try:
+            anchor = geo.Plane.Origin
+        except Exception:
+            anchor = Point3d.Origin
         try:
             pp = geo.Points3d
             if pp and len(pp) >= 2:
@@ -672,15 +1027,24 @@ def curves_from_annotation(geo):
         try:
             result = geo.CreateCurves(dimstyle, False)
             if result and len(result) > 0:
-                fill.extend(close_text_outlines(result))
+                crvs = list(result)
+                _scale_curves(crvs, anchor, dim_scale)
+                fill.extend(close_text_outlines(crvs))
         except Exception:
             pass
         return (stroke, fill)
 
     try:
+        dim_scale = get_annotation_scale(geo, dimstyle)
+        try:
+            anchor = geo.Plane.Origin
+        except Exception:
+            anchor = Point3d.Origin
         result = geo.CreateCurves(dimstyle, False)
         if result and len(result) > 0:
-            fill.extend(close_text_outlines(result))
+            crvs = list(result)
+            _scale_curves(crvs, anchor, dim_scale)
+            fill.extend(close_text_outlines(crvs))
     except Exception:
         pass
     return (stroke, fill)
@@ -837,7 +1201,7 @@ def get_obj_layer_name(obj):
     return sc.doc.Layers[obj.Attributes.LayerIndex].Name
 
 def get_dash_pattern_mm(obj, unit_scale):
-    """Pattern tratteggio in mm (il CTM nel content stream converte a pt)."""
+    """Pattern tratteggio in mm."""
     lt_idx = obj.Attributes.LinetypeIndex
     if lt_idx < 0:
         lt_idx = sc.doc.Layers[obj.Attributes.LayerIndex].LinetypeIndex
@@ -861,9 +1225,18 @@ def get_dash_pattern_mm(obj, unit_scale):
     return pattern
 
 
+def obj_is_dashed(obj):
+    """True se l'oggetto usa un tipo di linea tratteggiato (non continuo).
+    Riusa la stessa risoluzione oggetto->layer di get_dash_pattern_mm:
+    pattern vuoto = continuo, pattern presente = tratteggiato."""
+    try:
+        return len(get_dash_pattern_mm(obj, 1.0)) > 0
+    except Exception:
+        return False
+
+
 def pdf_safe_name(name):
-    """Escape di un nome per PDF Name object.
-    '#' va escaped PRIMA degli altri caratteri speciali."""
+    """Escape di un nome per PDF Name object."""
     out = []
     for ch in name:
         o = ord(ch)
@@ -891,26 +1264,38 @@ def build_pdf(objects, settings):
     margin_mm = settings['margin']
     layer_settings = settings['layers']
     color_map = settings['color_map']
+    width_map = settings.get('width_map', {})
 
     unit_scale = get_unit_scale()
 
-    # Mappa ogni oggetto al suo layer output tramite il colore
+    # Mappa ogni oggetto al suo layer output tramite la chiave composita
+    # (colore, tratteggio). Usa obj.Id (GUID stabile).
     obj_output_layer = {}
+    obj_group_key = {}
     for obj in objects:
         col = get_display_color(obj)
-        key = (col.R, col.G, col.B)
-        out_layer = color_map.get(key, None)
+        rgb = (col.R, col.G, col.B)
+        gk = (rgb, obj_is_dashed(obj))
+        obj_group_key[obj.Id] = gk
+
+        out_layer = color_map.get(gk, None)
+        # Fallback 1: stesso colore, qualsiasi tratteggio
         if out_layer is None:
-            # Fallback: prova con tolleranza minima
+            for (m_rgb, m_dash), m_layer in color_map.items():
+                if m_rgb == rgb:
+                    out_layer = m_layer
+                    break
+        # Fallback 2: colore piu' vicino
+        if out_layer is None:
             best_dist = float('inf')
-            for map_rgb, map_layer in color_map.items():
-                d = color_distance(key, map_rgb)
+            for (m_rgb, m_dash), m_layer in color_map.items():
+                d = color_distance(rgb, m_rgb)
                 if d < best_dist:
                     best_dist = d
-                    out_layer = map_layer
-            if out_layer is None:
-                out_layer = "Altro"
-        obj_output_layer[id(obj)] = out_layer
+                    out_layer = m_layer
+        if out_layer is None:
+            out_layer = "Altro"
+        obj_output_layer[obj.Id] = out_layer
 
     # Bounding box
     bbox = BoundingBox.Empty
@@ -936,7 +1321,7 @@ def build_pdf(objects, settings):
     layer_names_ordered = []
     layer_ocg = {}
     for obj in objects:
-        ln = obj_output_layer[id(obj)]
+        ln = obj_output_layer[obj.Id]
         if ln not in layer_ocg:
             layer_ocg[ln] = "OC_%d" % len(layer_names_ordered)
             layer_names_ordered.append(ln)
@@ -961,7 +1346,7 @@ def build_pdf(objects, settings):
         geo = obj.Geometry
         if geo is None:
             continue
-        ln = obj_output_layer[id(obj)]
+        ln = obj_output_layer[obj.Id]
         if ln not in layer_objects:
             layer_objects[ln] = []
         layer_objects[ln].append(obj)
@@ -1007,14 +1392,21 @@ def build_pdf(objects, settings):
             cl.append("%.4f %.4f %.4f %.4f K" % (c, m, y, k))
             cl.append("%.4f %.4f %.4f %.4f k" % (c, m, y, k))
 
-        # Spessore dal dialogo (override per-layer)
-        lw_mm = DEFAULT_LINE_WIDTH_MM
+        # Spessore di fallback per il layer (se un oggetto non ha gruppo)
+        lw_layer_default = DEFAULT_LINE_WIDTH_MM
         if ls and 'line_width' in ls:
-            lw_mm = ls['line_width']
+            lw_layer_default = ls['line_width']
 
         for obj in layer_objects[lname]:
             geo = obj.Geometry
             dash = get_dash_pattern_mm(obj, unit_scale)
+
+            # Spessore PER-OGGETTO: dipende dal gruppo (colore, tratteggio)
+            # del singolo oggetto, non da un unico valore di layer. Cosi'
+            # continue e tratteggiate dello stesso colore mantengono il
+            # proprio spessore anche sulla stessa lastra.
+            gk = obj_group_key.get(obj.Id)
+            lw_mm = width_map.get(gk, lw_layer_default)
 
             cl.append("%.4f w" % lw_mm)
             if dash:
@@ -1052,10 +1444,20 @@ def build_pdf(objects, settings):
         n_crv, n_ann, len(layer_names_ordered)))
     for lname in layer_names_ordered:
         ls = layer_settings.get(lname)
-        lw = ls.get('line_width', DEFAULT_LINE_WIDTH_MM) if ls else DEFAULT_LINE_WIDTH_MM
         tp = ls.get('type', '?') if ls else '?'
         n_obj = len(layer_objects.get(lname, []))
-        print("  '%s': %s, lw=%.2fmm, %d oggetti" % (lname, tp, lw, n_obj))
+        # Spessori effettivi (per-oggetto) presenti nel layer
+        lws = set()
+        for obj in layer_objects.get(lname, []):
+            gk = obj_group_key.get(obj.Id)
+            lws.add(round(width_map.get(gk,
+                          ls.get('line_width', DEFAULT_LINE_WIDTH_MM)
+                          if ls else DEFAULT_LINE_WIDTH_MM), 3))
+        if len(lws) <= 1:
+            lw_txt = "%.2fmm" % (list(lws)[0] if lws else DEFAULT_LINE_WIDTH_MM)
+        else:
+            lw_txt = "spessori: " + ", ".join("%.2f" % v for v in sorted(lws))
+        print("  '%s': %s, %s, %d oggetti" % (lname, tp, lw_txt, n_obj))
     if spot_list:
         print("Spot: %s" % ", ".join(
             "%s (R%.0f G%.0f B%.0f)" % (s[0], s[1]*255, s[2]*255, s[3]*255)
@@ -1077,12 +1479,12 @@ def build_pdf(objects, settings):
         return len(buf)
 
     n_layers = len(layer_names_ordered)
-    n_obj = 6 + n_layers  # 1-6 fissi + OCG per layer
+    n_obj = 6 + n_layers
 
     w("%%PDF-1.5\n")
-    w("%%\xe2\xe3\xcf\xd3\n")  # marker binario (best practice)
+    w("%%\xe2\xe3\xcf\xd3\n")
 
-    # Obj 1: Catalog con OCProperties potenziato
+    # Obj 1: Catalog con OCProperties
     off[1] = p()
     w("1 0 obj\n<< /Type /Catalog /Pages 2 0 R\n")
     if n_layers > 0:
@@ -1172,6 +1574,16 @@ def build_pdf(objects, settings):
 # MAIN
 # =============================================================================
 def main():
+    global _user_rules
+
+    # Carica preferenze salvate
+    saved_rules, saved_margin, saved_open_after = load_user_prefs()
+    _user_rules = saved_rules
+    if saved_rules:
+        print("Caricate %d regole utente da %s" % (
+            len(saved_rules), _prefs_path()))
+
+    # Selezione oggetti (con supporto pre-selezione)
     go = Rhino.Input.Custom.GetObject()
     go.SetCommandPrompt(
         "Seleziona curve, quote e testi da esportare in PDF vettoriale")
@@ -1179,6 +1591,7 @@ def main():
                          | Rhino.DocObjects.ObjectType.Annotation)
     go.SubObjectSelect = False
     go.GroupSelect = True
+    go.EnablePreSelect(True, True)
     go.GetMultiple(1, 0)
     if go.CommandResult() != Rhino.Commands.Result.Success:
         return
@@ -1189,57 +1602,88 @@ def main():
         return
     print("%d oggetti selezionati." % len(objects))
 
-    # Raggruppa oggetti per colore display (chiave di mappatura)
-    color_groups = {}   # (R,G,B) -> [obj, ...]
-    color_labels = {}   # (R,G,B) -> label (nome primo layer Rhino incontrato)
+    # Raggruppa oggetti per (colore display, tratteggio) = chiave di mappatura.
+    # Continue e tratteggiate dello stesso colore diventano righe distinte,
+    # perche' in Rhino hanno spesso plot weight diversi.
+    color_groups = {}
+    color_labels = {}
     for obj in objects:
         col = get_display_color(obj)
-        key = (col.R, col.G, col.B)
+        rgb = (col.R, col.G, col.B)
+        dashed = obj_is_dashed(obj)
+        key = (rgb, dashed)
         if key not in color_groups:
             color_groups[key] = []
             color_labels[key] = get_obj_layer_name(obj)
         color_groups[key].append(obj)
 
-    print("Colori unici trovati: %d" % len(color_groups))
+    print("Gruppi (colore, tratteggio) trovati: %d" % len(color_groups))
 
-    # Per ogni colore unico, cerca una regola di default
+    # Per ogni gruppo cerca una regola (utente -> default -> fallback)
+    # e inizializza lo spessore con il Print Width reale di Rhino, se presente.
     rows_data = []
-    for rgb in sorted(color_groups.keys()):
-        label = color_labels[rgb]
-        rule = find_matching_rule(*rgb)
+    for key in sorted(color_groups.keys()):
+        rgb, dashed = key
+        base_label = color_labels[key]
+        # Etichetta mostrata nel dialogo: marca le tratteggiate con " (tr)"
+        label = base_label + (" (tr)" if dashed else "")
+        rule = find_matching_rule(rgb[0], rgb[1], rgb[2], dashed)
+        tipo_txt = "tratteggiata" if dashed else "continua"
         if rule:
-            print("  R%d G%d B%d (%s) -> regola '%s'" % (
-                rgb[0], rgb[1], rgb[2], label, rule['output_layer']))
-            rows_data.append((rgb, label, dict(rule)))  # copia per sicurezza
+            row_rule = dict(rule)
+            print("  R%d G%d B%d %s (%s) -> regola '%s'" % (
+                rgb[0], rgb[1], rgb[2], tipo_txt, base_label,
+                row_rule['output_layer']))
         else:
-            print("  R%d G%d B%d (%s) -> nessuna regola (default)" % (
-                rgb[0], rgb[1], rgb[2], label))
-            # Default: spot con nome del layer Rhino
-            default = {
-                'output_layer': label,
+            print("  R%d G%d B%d %s (%s) -> nessuna regola (default)" % (
+                rgb[0], rgb[1], rgb[2], tipo_txt, base_label))
+            row_rule = {
+                'output_layer': base_label,
                 'color_type': 'spot',
-                'spot_name': label,
+                'spot_name': base_label,
                 'rgb': rgb,
                 'line_width': DEFAULT_LINE_WIDTH_MM,
                 'overprint': True,
             }
-            rows_data.append((rgb, label, default))
 
-    # Mostra dialogo
-    dlg = ExportDialog(rows_data)
+        rhino_lw, all_lw = get_group_plot_weight_mm(color_groups[key])
+        if rhino_lw is not None:
+            # Il valore mostrato nella finestra parte dallo spessore stampa
+            # Rhino del gruppo, non dalla regola hardcoded.
+            row_rule['line_width'] = rhino_lw
+            print("      spessore Rhino -> %.3f mm" % rhino_lw)
+            if len(all_lw) > 1:
+                print("      [WARN] stesso gruppo con piu' spessori Rhino: %s. "
+                      "La riga usa %.3f mm." % (
+                          ", ".join("%.3f" % v for v in all_lw), rhino_lw))
+        else:
+            print("      spessore Rhino non impostato: uso %.3f mm dalla regola" % (
+                row_rule.get('line_width', DEFAULT_LINE_WIDTH_MM)))
+
+        rows_data.append((key, label, row_rule))
+
+    # Mostra dialogo (con preferenze salvate)
+    dlg = ExportDialog(rows_data, saved_margin, saved_open_after)
     if dlg.ShowDialog() != WinForms.DialogResult.OK or dlg.result is None:
         print("Annullato.")
         return
 
+    # Genera PDF
     pdf_data = build_pdf(objects, dlg.result)
     if pdf_data is None:
         return
     print("PDF: %d bytes." % len(pdf_data))
 
+    # Salva PDF (con nome e cartella proposti dal .3dm)
     fd = Rhino.UI.SaveFileDialog()
     fd.Filter = "PDF (*.pdf)|*.pdf"
     fd.Title = "Salva PDF vettoriale"
     fd.DefaultExt = "pdf"
+    doc_path = sc.doc.Path
+    if doc_path:
+        fd.InitialDirectory = os.path.dirname(doc_path)
+        fd.FileName = os.path.splitext(
+            os.path.basename(doc_path))[0] + ".pdf"
     if not fd.ShowSaveDialog():
         print("Annullato.")
         return
@@ -1252,6 +1696,20 @@ def main():
             f.write(bytes(pdf_data))
         print("Salvato: %s" % filepath)
     except Exception as e:
-        print("Errore: %s" % str(e))
+        print("Errore salvataggio: %s" % str(e))
+        return
+
+    # Salva preferenze (regole + margine + open_after)
+    save_user_prefs(
+        dlg._rows_settings,
+        dlg.result['margin'],
+        dlg.result['open_after'])
+
+    # Apri PDF dopo l'export (se richiesto)
+    if dlg.result.get('open_after', False):
+        try:
+            System.Diagnostics.Process.Start(filepath)
+        except Exception as e:
+            print("  [WARN] Impossibile aprire il PDF: %s" % e)
 
 main()
