@@ -427,7 +427,9 @@ def find_matching_rule(r, g, b, is_dashed=None):
 # DIALOGO IMPOSTAZIONI v1.6
 # =============================================================================
 class LayerRow(object):
-    """Controlli per una riga di mappatura nel dialogo."""
+    """Controlli per una riga di mappatura nel dialogo.
+    Layout ingrandito: swatch, campi e controlli piu' grandi per una
+    migliore leggibilita' (il font e' ereditato dal Panel contenitore)."""
     def __init__(self, parent, y, group_key, input_label, rule):
         # group_key = (rgb_tuple, is_dashed)
         self.group_key = group_key
@@ -440,8 +442,8 @@ class LayerRow(object):
 
         # -- Colore input (swatch) --
         pnl = WinForms.Panel()
-        pnl.Location = Drawing.Point(6, y + 4)
-        pnl.Size = Drawing.Size(18, 18)
+        pnl.Location = Drawing.Point(8, y + 7)
+        pnl.Size = Drawing.Size(24, 24)
         pnl.BackColor = self.input_color
         pnl.BorderStyle = WinForms.BorderStyle.FixedSingle
         parent.Controls.Add(pnl)
@@ -449,23 +451,23 @@ class LayerRow(object):
         # -- Label input (nome layer Rhino) --
         lbl = WinForms.Label()
         lbl.Text = input_label
-        lbl.Location = Drawing.Point(28, y + 5)
-        lbl.Size = Drawing.Size(78, 18)
+        lbl.Location = Drawing.Point(42, y + 9)
+        lbl.Size = Drawing.Size(118, 22)
         parent.Controls.Add(lbl)
 
         # -- Freccia --
         arr = WinForms.Label()
         arr.Text = unichr(0x2192)
-        arr.Location = Drawing.Point(108, y + 4)
-        arr.Size = Drawing.Size(16, 18)
-        arr.Font = Drawing.Font(arr.Font.FontFamily, 10.0)
+        arr.Location = Drawing.Point(164, y + 6)
+        arr.Size = Drawing.Size(24, 24)
+        arr.Font = Drawing.Font(arr.Font.FontFamily, 13.0)
         parent.Controls.Add(arr)
 
         # -- Nome layer output (editable) --
         self.txt_output = WinForms.TextBox()
         self.txt_output.Text = rule.get('output_layer', input_label)
-        self.txt_output.Location = Drawing.Point(126, y + 2)
-        self.txt_output.Size = Drawing.Size(82, 22)
+        self.txt_output.Location = Drawing.Point(192, y + 6)
+        self.txt_output.Size = Drawing.Size(128, 26)
         parent.Controls.Add(self.txt_output)
 
         # -- Tipo output --
@@ -475,46 +477,46 @@ class LayerRow(object):
         ct = rule.get('color_type', 'spot')
         self.combo.SelectedIndex = 0 if ct == 'spot' else 1
         self.combo.DropDownStyle = WinForms.ComboBoxStyle.DropDownList
-        self.combo.Location = Drawing.Point(212, y + 2)
-        self.combo.Size = Drawing.Size(56, 22)
+        self.combo.Location = Drawing.Point(330, y + 6)
+        self.combo.Size = Drawing.Size(86, 26)
         self.combo.SelectedIndexChanged += self.on_type_changed
         parent.Controls.Add(self.combo)
 
         # -- Controlli Spot: R/G/B --
         spot_rgb = rule.get('rgb', self.input_rgb)
-        x = 274
-        self.lbl_r = self._lbl(parent, "R", x, y + 5)
-        self.nud_r = self._nud(parent, spot_rgb[0], 0, 255, x + 13, y + 2, 42)
-        self.lbl_g = self._lbl(parent, "G", x + 58, y + 5)
-        self.nud_g = self._nud(parent, spot_rgb[1], 0, 255, x + 71, y + 2, 42)
-        self.lbl_b = self._lbl(parent, "B", x + 116, y + 5)
-        self.nud_b = self._nud(parent, spot_rgb[2], 0, 255, x + 129, y + 2, 42)
+        x = 426
+        self.lbl_r = self._lbl(parent, "R", x, y + 9)
+        self.nud_r = self._nud(parent, spot_rgb[0], 0, 255, x + 16, y + 6, 54)
+        self.lbl_g = self._lbl(parent, "G", x + 76, y + 9)
+        self.nud_g = self._nud(parent, spot_rgb[1], 0, 255, x + 92, y + 6, 54)
+        self.lbl_b = self._lbl(parent, "B", x + 152, y + 9)
+        self.nud_b = self._nud(parent, spot_rgb[2], 0, 255, x + 168, y + 6, 54)
 
         # -- Controlli CMYK: C/M/Y/K (stessa posizione, nascosti) --
         rule_cmyk = rule.get('cmyk', None)
         if rule_cmyk is None:
             rule_cmyk = rgb_to_cmyk(ir, ig, ib)
-        x2 = 274
-        self.lbl_c = self._lbl(parent, "C", x2, y + 5)
+        x2 = 426
+        self.lbl_c = self._lbl(parent, "C", x2, y + 9)
         self.nud_c = self._nud(parent, int(rule_cmyk[0] * 100 + 0.5),
-                               0, 100, x2 + 13, y + 2, 40)
-        self.lbl_m = self._lbl(parent, "M", x2 + 56, y + 5)
+                               0, 100, x2 + 16, y + 6, 50)
+        self.lbl_m = self._lbl(parent, "M", x2 + 72, y + 9)
         self.nud_m = self._nud(parent, int(rule_cmyk[1] * 100 + 0.5),
-                               0, 100, x2 + 69, y + 2, 40)
-        self.lbl_y2 = self._lbl(parent, "Y", x2 + 112, y + 5)
+                               0, 100, x2 + 90, y + 6, 50)
+        self.lbl_y2 = self._lbl(parent, "Y", x2 + 146, y + 9)
         self.nud_y = self._nud(parent, int(rule_cmyk[2] * 100 + 0.5),
-                               0, 100, x2 + 125, y + 2, 40)
-        self.lbl_k = self._lbl(parent, "K", x2 + 168, y + 5)
+                               0, 100, x2 + 162, y + 6, 50)
+        self.lbl_k = self._lbl(parent, "K", x2 + 218, y + 9)
         self.nud_k = self._nud(parent, int(rule_cmyk[3] * 100 + 0.5),
-                               0, 100, x2 + 181, y + 2, 40)
+                               0, 100, x2 + 234, y + 6, 50)
 
         # -- Spessore linea (mm) --
         lw = rule.get('line_width', DEFAULT_LINE_WIDTH_MM)
-        x_lw = 506
-        self.lbl_lw = self._lbl(parent, "lw", x_lw, y + 5)
+        x_lw = 726
+        self.lbl_lw = self._lbl(parent, "lw", x_lw, y + 9)
         self.nud_lw = WinForms.NumericUpDown()
-        self.nud_lw.Location = Drawing.Point(x_lw + 18, y + 2)
-        self.nud_lw.Size = Drawing.Size(50, 24)
+        self.nud_lw.Location = Drawing.Point(x_lw + 24, y + 6)
+        self.nud_lw.Size = Drawing.Size(62, 26)
         self.nud_lw.Minimum = System.Decimal(0)
         self.nud_lw.Maximum = System.Decimal(5)
         self.nud_lw.DecimalPlaces = 2
@@ -524,15 +526,15 @@ class LayerRow(object):
 
         lbl_mm = WinForms.Label()
         lbl_mm.Text = "mm"
-        lbl_mm.Location = Drawing.Point(x_lw + 70, y + 5)
-        lbl_mm.Size = Drawing.Size(22, 16)
+        lbl_mm.Location = Drawing.Point(x_lw + 90, y + 9)
+        lbl_mm.Size = Drawing.Size(28, 20)
         parent.Controls.Add(lbl_mm)
 
         # -- OVP (sovrastampa) --
         self.chk_ovp = WinForms.CheckBox()
         self.chk_ovp.Text = "OVP"
-        self.chk_ovp.Location = Drawing.Point(602, y + 3)
-        self.chk_ovp.Size = Drawing.Size(50, 20)
+        self.chk_ovp.Location = Drawing.Point(852, y + 7)
+        self.chk_ovp.Size = Drawing.Size(64, 24)
         self.chk_ovp.Checked = rule.get('overprint', True)
         parent.Controls.Add(self.chk_ovp)
 
@@ -542,14 +544,14 @@ class LayerRow(object):
         lbl = WinForms.Label()
         lbl.Text = text
         lbl.Location = Drawing.Point(x, y)
-        lbl.Size = Drawing.Size(14, 16)
+        lbl.Size = Drawing.Size(16, 20)
         parent.Controls.Add(lbl)
         return lbl
 
-    def _nud(self, parent, val, lo, hi, x, y, w=44):
+    def _nud(self, parent, val, lo, hi, x, y, w=54):
         nud = WinForms.NumericUpDown()
         nud.Location = Drawing.Point(x, y)
-        nud.Size = Drawing.Size(w, 24)
+        nud.Size = Drawing.Size(w, 26)
         nud.Minimum = System.Decimal(lo)
         nud.Maximum = System.Decimal(hi)
         nud.DecimalPlaces = 0
@@ -606,7 +608,8 @@ class LayerRow(object):
 
 
 class ExportDialog(WinForms.Form):
-    """Dialogo v1.8: mappatura colore input -> layer output."""
+    """Dialogo v2.0: mappatura colore input -> layer output.
+    Layout ingrandito e finestra piu' larga per una migliore leggibilita'."""
     def __init__(self, rows_data, saved_margin, saved_open_after):
         """rows_data: [(group_key, input_label, matched_rule), ...]
         dove group_key = (rgb_tuple, is_dashed).
@@ -625,49 +628,62 @@ class ExportDialog(WinForms.Form):
 
         # Auto-scaling DPI: a risoluzioni/zoom diversi (es. 125/150% in
         # fabbrica) WinForms riscala in proporzione font e controlli, cosi'
-        # le caselle non tagliano piu' le cifre.
+        # le caselle non tagliano piu' le cifre. Il font del Form resta
+        # quello di default (baseline 6x13) per non ri-scalare due volte:
+        # l'ingrandimento e' gia' nelle coordinate e nel font del Panel.
         self.AutoScaleDimensions = Drawing.SizeF(6.0, 13.0)
         self.AutoScaleMode = WinForms.AutoScaleMode.Font
 
+        # Font piu' grande applicato ai contenitori (non al Form) per
+        # ingrandire il testo dei controlli senza alterare l'auto-scaling.
+        try:
+            ui_font = Drawing.Font("Segoe UI", 9.75)
+        except Exception:
+            ui_font = Drawing.Font(WinForms.Control.DefaultFont.FontFamily, 9.75)
+        self._ui_font = ui_font
+
+        client_w = 950
+        panel_w = 940
         n = len(rows_data)
-        row_h = 28
-        header_h = 50
-        list_h = min(max(n * row_h + 8, 50), 350)
-        footer_h = 80
-        self.ClientSize = Drawing.Size(670, header_h + list_h + footer_h)
+        row_h = 36
+        header_h = 58
+        list_h = min(max(n * row_h + 10, 60), 468)
+        footer_h = 104
+        self.ClientSize = Drawing.Size(client_w, header_h + list_h + footer_h)
 
         # --- Intestazione ---
         lbl_title = WinForms.Label()
         lbl_title.Text = ("Mappatura colori input  " + unichr(0x2192)
                           + "  livelli PDF output    [(tr) = linea tratteggiata]")
-        lbl_title.Font = Drawing.Font(lbl_title.Font, Drawing.FontStyle.Bold)
-        lbl_title.Location = Drawing.Point(10, 8)
+        lbl_title.Font = Drawing.Font(lbl_title.Font.FontFamily, 11.0,
+                                      Drawing.FontStyle.Bold)
+        lbl_title.Location = Drawing.Point(12, 10)
         lbl_title.AutoSize = True
         self.Controls.Add(lbl_title)
 
-        # Colonne header
-        headers = [("Input", 6), ("Layer in", 42),
-                   ("", 110),
-                   ("Layer out", 126), ("Tipo", 214),
-                   ("Colore", 280),
-                   ("Spessore", 510), ("", 602)]
+        # Colonne header (allineate alle colonne di LayerRow)
+        headers = [("Input", 8), ("Layer in", 42),
+                   ("Layer out", 192), ("Tipo", 330),
+                   ("Colore", 426),
+                   ("Spessore", 726), ("OVP", 852)]
         for txt, x in headers:
             if not txt:
                 continue
             lh = WinForms.Label()
             lh.Text = txt
-            lh.Location = Drawing.Point(x, 28)
+            lh.Location = Drawing.Point(x, 36)
             lh.AutoSize = True
             lh.ForeColor = Drawing.Color.Gray
-            lh.Font = Drawing.Font(lh.Font.FontFamily, 7.5)
+            lh.Font = Drawing.Font(lh.Font.FontFamily, 8.5)
             self.Controls.Add(lh)
 
         # --- Panel layer ---
         panel = WinForms.Panel()
         panel.Location = Drawing.Point(0, header_h)
-        panel.Size = Drawing.Size(660, list_h)
+        panel.Size = Drawing.Size(panel_w, list_h)
         panel.AutoScroll = True
         panel.BorderStyle = WinForms.BorderStyle.FixedSingle
+        panel.Font = ui_font  # ereditato da tutti i controlli delle righe
         self.Controls.Add(panel)
 
         for i, (group_key, input_label, rule) in enumerate(rows_data):
@@ -675,24 +691,26 @@ class ExportDialog(WinForms.Form):
             self.layer_rows.append(lr)
 
         # --- Footer ---
-        y_foot = header_h + list_h + 8
+        y_foot = header_h + list_h + 10
 
         sep = WinForms.Label()
         sep.BorderStyle = WinForms.BorderStyle.Fixed3D
-        sep.Location = Drawing.Point(10, y_foot)
-        sep.Size = Drawing.Size(640, 2)
+        sep.Location = Drawing.Point(12, y_foot)
+        sep.Size = Drawing.Size(client_w - 24, 2)
         self.Controls.Add(sep)
 
         # Margine
         lbl_m = WinForms.Label()
         lbl_m.Text = "Margine pagina:"
-        lbl_m.Location = Drawing.Point(10, y_foot + 12)
+        lbl_m.Location = Drawing.Point(12, y_foot + 16)
         lbl_m.AutoSize = True
+        lbl_m.Font = ui_font
         self.Controls.Add(lbl_m)
 
         self.margin_box = WinForms.NumericUpDown()
-        self.margin_box.Location = Drawing.Point(110, y_foot + 10)
-        self.margin_box.Size = Drawing.Size(60, 22)
+        self.margin_box.Location = Drawing.Point(150, y_foot + 13)
+        self.margin_box.Size = Drawing.Size(72, 26)
+        self.margin_box.Font = ui_font
         self.margin_box.Minimum = System.Decimal(0)
         self.margin_box.Maximum = System.Decimal(200)
         self.margin_box.DecimalPlaces = 1
@@ -703,31 +721,35 @@ class ExportDialog(WinForms.Form):
 
         lbl_mm = WinForms.Label()
         lbl_mm.Text = "mm"
-        lbl_mm.Location = Drawing.Point(174, y_foot + 12)
+        lbl_mm.Location = Drawing.Point(228, y_foot + 16)
         lbl_mm.AutoSize = True
+        lbl_mm.Font = ui_font
         self.Controls.Add(lbl_mm)
 
         # Checkbox: Apri PDF dopo l'export
         self.chk_open = WinForms.CheckBox()
         self.chk_open.Text = "Apri PDF dopo l'export"
-        self.chk_open.Location = Drawing.Point(250, y_foot + 11)
-        self.chk_open.Size = Drawing.Size(170, 20)
+        self.chk_open.Location = Drawing.Point(330, y_foot + 15)
+        self.chk_open.Size = Drawing.Size(240, 24)
+        self.chk_open.Font = ui_font
         self.chk_open.Checked = saved_open_after
         self.Controls.Add(self.chk_open)
 
         # Pulsanti
         btn_ok = WinForms.Button()
         btn_ok.Text = "Esporta"
-        btn_ok.Size = Drawing.Size(80, 28)
-        btn_ok.Location = Drawing.Point(470, y_foot + 40)
+        btn_ok.Size = Drawing.Size(104, 34)
+        btn_ok.Location = Drawing.Point(client_w - 224, y_foot + 46)
+        btn_ok.Font = ui_font
         btn_ok.Click += self.on_ok
         self.Controls.Add(btn_ok)
         self.AcceptButton = btn_ok
 
         btn_cancel = WinForms.Button()
         btn_cancel.Text = "Annulla"
-        btn_cancel.Size = Drawing.Size(80, 28)
-        btn_cancel.Location = Drawing.Point(560, y_foot + 40)
+        btn_cancel.Size = Drawing.Size(104, 34)
+        btn_cancel.Location = Drawing.Point(client_w - 112, y_foot + 46)
+        btn_cancel.Font = ui_font
         btn_cancel.Click += self.on_cancel
         self.Controls.Add(btn_cancel)
         self.CancelButton = btn_cancel
