@@ -2,7 +2,22 @@
 # -*- coding: utf-8 -*-
 
 # =============================================================================
-#  PKG ESPORTA PDF VETTORIALE  v2.0  -  Rhino 7 / 8  (IronPython 2.7)
+#  PKG ESPORTA PDF VETTORIALE  v2.1  -  Rhino 7 / 8  (IronPython 2.7)
+#
+#  Novita' v2.1 (finestra ingrandita + file di configurazione):
+#    - INTERFACCIA PIU' GRANDE: finestra piu' larga (950 px), righe piu'
+#      alte e font dei controlli maggiore per una migliore leggibilita'.
+#    - FILE DI CONFIGURAZIONE PORTABILE: due pulsanti "Salva config..." e
+#      "Carica config..." nel dialogo permettono di salvare le impostazioni
+#      di output (layer, spot/CMYK, colori, spessori, overprint, margine)
+#      in un file .json scelto dall'utente e di ricaricarlo su QUALSIASI
+#      altro disegno o PC. Il file usa lo stesso schema di prefs.json ed e'
+#      quindi interscambiabile con le preferenze automatiche in %APPDATA%.
+#    - FIX SERIALIZZAZIONE JSON: i colori Rhino (System.Byte) vengono ora
+#      convertiti in interi Python prima del salvataggio (risolve l'errore
+#      "0 is not JSON serializable" che faceva fallire anche prefs.json).
+#      Il JSON viene serializzato in stringa e poi scritto, evitando file
+#      troncati in caso di errore.
 #
 #  Novita' v2.0 (spessore per tipo di linea):
 #    - RAGGRUPPAMENTO PER (COLORE, TRATTEGGIO): le righe del dialogo
@@ -141,13 +156,7 @@ def load_user_prefs():
             return ([], DEFAULT_MARGIN_MM, True)
         with open(path, "r") as f:
             data = json.load(f)
-        rules = data.get("rules", [])
-        for r in rules:
-            r['match_color'] = tuple(r['match_color'])
-            if 'rgb' in r:
-                r['rgb'] = tuple(r['rgb'])
-            if 'cmyk' in r:
-                r['cmyk'] = tuple(r['cmyk'])
+        rules = _normalize_rules(data.get("rules", []))
         margin = data.get("margin", DEFAULT_MARGIN_MM)
         open_after = data.get("open_after", True)
         return (rules, margin, open_after)
@@ -162,31 +171,114 @@ def save_user_prefs(rows_settings, margin, open_after):
         d = _prefs_dir()
         if not os.path.isdir(d):
             os.makedirs(d)
-        data = {
-            "rules": [],
-            "margin": margin,
-            "open_after": open_after,
-        }
-        for s in rows_settings:
-            entry = {
-                'match_color': list(s['match_color']),
-                'match_tolerance': 5,
-                'match_dashed': bool(s.get('match_dashed', False)),
-                'output_layer': s['output_layer'],
-                'color_type': s['type'],
-                'spot_name': s.get('spot_name', s['output_layer']),
-                'rgb': list(s.get('rgb', s['match_color'])),
-                'cmyk': list(s.get('cmyk', (0, 0, 0, 1))),
-                'line_width': s['line_width'],
-                'overprint': s['overprint'],
-            }
-            data["rules"].append(entry)
+        data = _build_prefs_data(rows_settings, margin, open_after)
+        text = json.dumps(data, indent=2)
         path = _prefs_path()
         with open(path, "w") as f:
-            json.dump(data, f, indent=2)
+            f.write(text)
         print("Preferenze salvate in: %s" % path)
     except Exception as e:
         print("  [WARN] Salvataggio preferenze fallito: %s" % e)
+
+
+def _rule_entry_from_settings(s):
+    """Converte le impostazioni di una riga (get_settings) in una regola
+    serializzabile per prefs.json / file di configurazione.
+    I valori numerici sono forzati a tipi Python nativi: i colori letti
+    da Rhino sono System.Byte e non sono serializzabili in JSON."""
+    match_color = [int(v) for v in s['match_color']]
+    rgb = [int(v) for v in s.get('rgb', s['match_color'])]
+    cmyk = [float(v) for v in s.get('cmyk', (0.0, 0.0, 0.0, 1.0))]
+    return {
+        'match_color': match_color,
+        'match_tolerance': 5,
+        'match_dashed': bool(s.get('match_dashed', False)),
+        'output_layer': str(s['output_layer']),
+        'color_type': str(s['type']),
+        'spot_name': str(s.get('spot_name', s['output_layer'])),
+        'rgb': rgb,
+        'cmyk': cmyk,
+        'line_width': float(s['line_width']),
+        'overprint': bool(s['overprint']),
+    }
+
+
+def _build_prefs_data(rows_settings, margin, open_after):
+    """Costruisce il dizionario completo (schema unico per prefs e config)."""
+    data = {"rules": [], "margin": float(margin),
+            "open_after": bool(open_after)}
+    for s in rows_settings:
+        data["rules"].append(_rule_entry_from_settings(s))
+    return data
+
+
+def _normalize_rules(rules):
+    """Converte in tuple i campi colore letti dal JSON (in-place)."""
+    for r in rules:
+        if 'match_color' in r:
+            r['match_color'] = tuple(r['match_color'])
+        if 'rgb' in r:
+            r['rgb'] = tuple(r['rgb'])
+        if 'cmyk' in r:
+            r['cmyk'] = tuple(r['cmyk'])
+    return rules
+
+
+def write_config_file(path, rows_settings, margin, open_after):
+    """Salva la configurazione corrente in un file JSON scelto dall'utente.
+    Stesso schema di prefs.json: e' quindi interscambiabile con le
+    preferenze automatiche e riutilizzabile su qualsiasi disegno/PC."""
+    try:
+        data = _build_prefs_data(rows_settings, margin, open_after)
+        text = json.dumps(data, indent=2)
+        with open(path, "w") as f:
+            f.write(text)
+        print("Configurazione salvata: %s" % path)
+        return True
+    except Exception as e:
+        print("  [WARN] Salvataggio configurazione fallito: %s" % e)
+        return False
+
+
+def read_config_file(path):
+    """Legge un file di configurazione JSON (schema prefs).
+    Restituisce (rules, margin, open_after); rules e' None se errore."""
+    try:
+        with open(path, "r") as f:
+            data = json.load(f)
+        rules = _normalize_rules(data.get("rules", []))
+        margin = data.get("margin", DEFAULT_MARGIN_MM)
+        open_after = data.get("open_after", True)
+        return (rules, margin, open_after)
+    except Exception as e:
+        print("  [WARN] Lettura configurazione fallita: %s" % e)
+        return (None, DEFAULT_MARGIN_MM, True)
+
+
+def find_rule_in_list(rules_list, r, g, b, is_dashed=None):
+    """Trova la regola con match migliore in una singola lista.
+    A parita' di distanza colore preferisce la regola specifica (dash)."""
+    best = None
+    best_dist = float('inf')
+    best_specific = False
+    for rule in rules_list:
+        if 'match_color' not in rule:
+            continue
+        dist = color_distance((r, g, b), rule['match_color'])
+        tol = rule.get('match_tolerance', 10)
+        if dist > tol:
+            continue
+        rdash = rule.get('match_dashed', None)
+        if rdash is not None and is_dashed is not None and rdash != is_dashed:
+            continue  # regola per l'altro tipo di linea
+        specific = (rdash is not None and is_dashed is not None
+                    and rdash == is_dashed)
+        if (specific and not best_specific) or \
+           (specific == best_specific and dist < best_dist):
+            best = rule
+            best_dist = dist
+            best_specific = specific
+    return best
 
 
 # =============================================================================
@@ -400,24 +492,7 @@ def find_matching_rule(r, g, b, is_dashed=None):
     tratteggio dell'oggetto; le regole senza 'match_dashed' valgono per
     entrambi. A parita', si preferisce la regola piu' specifica (dash)."""
     for rules_list in [_user_rules, DEFAULT_RULES]:
-        best = None
-        best_dist = float('inf')
-        best_specific = False
-        for rule in rules_list:
-            dist = color_distance((r, g, b), rule['match_color'])
-            tol = rule.get('match_tolerance', 10)
-            if dist > tol:
-                continue
-            rdash = rule.get('match_dashed', None)
-            if rdash is not None and is_dashed is not None and rdash != is_dashed:
-                continue  # regola per l'altro tipo di linea
-            specific = (rdash is not None and is_dashed is not None
-                        and rdash == is_dashed)
-            if (specific and not best_specific) or \
-               (specific == best_specific and dist < best_dist):
-                best = rule
-                best_dist = dist
-                best_specific = specific
+        best = find_rule_in_list(rules_list, r, g, b, is_dashed)
         if best is not None:
             return best
     return None
@@ -559,6 +634,58 @@ class LayerRow(object):
         parent.Controls.Add(nud)
         return nud
 
+    def _set_nud(self, nud, val):
+        """Imposta un NumericUpDown intero con clamp entro min/max."""
+        try:
+            v = int(round(float(val)))
+        except Exception:
+            return
+        lo = int(nud.Minimum)
+        hi = int(nud.Maximum)
+        nud.Value = System.Decimal(max(lo, min(hi, v)))
+
+    def _set_lw(self, mm):
+        """Imposta lo spessore (mm) con clamp e passo 0.01."""
+        try:
+            mm = float(mm)
+        except Exception:
+            return
+        mm = max(0.0, min(5.0, mm))
+        self.nud_lw.Value = (System.Decimal(int(round(mm * 100)))
+                             / System.Decimal(100))
+
+    def apply_settings(self, rule):
+        """Applica alla riga una regola (schema config/prefs o get_settings)."""
+        ct = rule.get('color_type', rule.get('type', 'spot'))
+        is_cmyk = (ct == 'cmyk')
+
+        out_name = rule.get('output_layer')
+        if out_name:
+            self.txt_output.Text = out_name
+
+        rgb = rule.get('rgb')
+        if rgb and len(rgb) >= 3:
+            self._set_nud(self.nud_r, rgb[0])
+            self._set_nud(self.nud_g, rgb[1])
+            self._set_nud(self.nud_b, rgb[2])
+
+        cmyk = rule.get('cmyk')
+        if cmyk and len(cmyk) >= 4:
+            # nel file i valori CMYK sono 0..1, nel dialogo 0..100
+            self._set_nud(self.nud_c, cmyk[0] * 100)
+            self._set_nud(self.nud_m, cmyk[1] * 100)
+            self._set_nud(self.nud_y, cmyk[2] * 100)
+            self._set_nud(self.nud_k, cmyk[3] * 100)
+
+        if 'line_width' in rule:
+            self._set_lw(rule['line_width'])
+
+        if 'overprint' in rule:
+            self.chk_ovp.Checked = bool(rule['overprint'])
+
+        self.combo.SelectedIndex = 1 if is_cmyk else 0
+        self._show_cmyk(is_cmyk)
+
     def _show_cmyk(self, show):
         for c in [self.lbl_c, self.nud_c, self.lbl_m, self.nud_m,
                   self.lbl_y2, self.nud_y, self.lbl_k, self.nud_k]:
@@ -620,7 +747,7 @@ class ExportDialog(WinForms.Form):
         self.rows_data = rows_data
         self._rows_settings = []   # popolato in on_ok per persistenza
 
-        self.Text = "PKG Esporta PDF Vettoriale  v2.0"
+        self.Text = "PKG Esporta PDF Vettoriale  v2.1"
         self.FormBorderStyle = WinForms.FormBorderStyle.FixedDialog
         self.MaximizeBox = False
         self.MinimizeBox = False
@@ -735,6 +862,23 @@ class ExportDialog(WinForms.Form):
         self.chk_open.Checked = saved_open_after
         self.Controls.Add(self.chk_open)
 
+        # Pulsanti configurazione (profilo portabile, salva/carica)
+        btn_load = WinForms.Button()
+        btn_load.Text = "Carica config..."
+        btn_load.Size = Drawing.Size(132, 34)
+        btn_load.Location = Drawing.Point(12, y_foot + 46)
+        btn_load.Font = ui_font
+        btn_load.Click += self.on_load_config
+        self.Controls.Add(btn_load)
+
+        btn_save = WinForms.Button()
+        btn_save.Text = "Salva config..."
+        btn_save.Size = Drawing.Size(132, 34)
+        btn_save.Location = Drawing.Point(152, y_foot + 46)
+        btn_save.Font = ui_font
+        btn_save.Click += self.on_save_config
+        self.Controls.Add(btn_save)
+
         # Pulsanti
         btn_ok = WinForms.Button()
         btn_ok.Text = "Esporta"
@@ -813,6 +957,81 @@ class ExportDialog(WinForms.Form):
         self.result = None
         self.DialogResult = WinForms.DialogResult.Cancel
         self.Close()
+
+    def on_save_config(self, sender, args):
+        """Salva le impostazioni correnti del dialogo in un file .json
+        scelto dall'utente (riutilizzabile su qualsiasi disegno/PC)."""
+        fd = Rhino.UI.SaveFileDialog()
+        fd.Filter = "Config PKG (*.json)|*.json"
+        fd.Title = "Salva configurazione output"
+        fd.DefaultExt = "json"
+        fd.FileName = "PKG_config.json"
+        if not fd.ShowSaveDialog():
+            return
+        path = fd.FileName
+        if not path.lower().endswith(".json"):
+            path += ".json"
+        rows_settings = [lr.get_settings() for lr in self.layer_rows]
+        ok = write_config_file(
+            path, rows_settings,
+            float(self.margin_box.Value),
+            self.chk_open.Checked)
+        if ok:
+            WinForms.MessageBox.Show(
+                "Configurazione salvata:\n\n%s" % path,
+                "Salva configurazione",
+                WinForms.MessageBoxButtons.OK,
+                WinForms.MessageBoxIcon.Information)
+        else:
+            WinForms.MessageBox.Show(
+                "Salvataggio non riuscito. Vedi la console di Rhino.",
+                "Salva configurazione",
+                WinForms.MessageBoxButtons.OK,
+                WinForms.MessageBoxIcon.Error)
+
+    def on_load_config(self, sender, args):
+        """Carica un file .json e applica le regole alle righe correnti
+        abbinandole per colore/tratteggio; imposta anche margine e checkbox."""
+        fd = Rhino.UI.OpenFileDialog()
+        fd.Filter = "Config PKG (*.json)|*.json|Tutti i file (*.*)|*.*"
+        fd.Title = "Carica configurazione output"
+        fd.DefaultExt = "json"
+        if not fd.ShowOpenDialog():
+            return
+        path = fd.FileName
+        rules, margin, open_after = read_config_file(path)
+        if rules is None:
+            WinForms.MessageBox.Show(
+                "Impossibile leggere il file di configurazione.",
+                "Carica configurazione",
+                WinForms.MessageBoxButtons.OK,
+                WinForms.MessageBoxIcon.Error)
+            return
+
+        applied = 0
+        for lr in self.layer_rows:
+            rgb = lr.input_rgb
+            rule = find_rule_in_list(rules, rgb[0], rgb[1], rgb[2],
+                                     lr.is_dashed)
+            if rule:
+                lr.apply_settings(rule)
+                applied += 1
+
+        # Margine e apertura PDF
+        try:
+            m = max(0.0, min(200.0, float(margin)))
+            self.margin_box.Value = (System.Decimal(int(round(m * 10)))
+                                     / System.Decimal(10))
+        except Exception:
+            pass
+        self.chk_open.Checked = bool(open_after)
+
+        WinForms.MessageBox.Show(
+            "Configurazione applicata a %d righe su %d.\n\nFile: %s"
+            % (applied, len(self.layer_rows), path),
+            "Carica configurazione",
+            WinForms.MessageBoxButtons.OK,
+            WinForms.MessageBoxIcon.Information)
 
 
 # =============================================================================
